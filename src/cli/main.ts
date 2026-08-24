@@ -1,5 +1,6 @@
 import { parseArgs, type Command } from './args.js';
 import { analyzeCommand } from './analyze.js';
+import { anatomyCommand } from './anatomy.js';
 import { breakevenCommand } from './breakeven.js';
 import { complianceCommand } from './compliance.js';
 import { corporaCommand } from './corpora.js';
@@ -9,6 +10,7 @@ import { cliVersion } from '../version.js';
 
 const COMMANDS: Command[] = [
   analyzeCommand,
+  anatomyCommand,
   complianceCommand,
   corporaCommand,
   breakevenCommand,

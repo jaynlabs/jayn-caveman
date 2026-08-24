@@ -1,4 +1,5 @@
 import { readRawEvents, type RawEvent } from './events.js';
+import { memoCountTokens } from './tokens.js';
 
 export interface Turn {
   index: number;
@@ -12,6 +13,40 @@ export interface Turn {
   onlyTextBlocks: boolean;
 
   hasToolUse: boolean;
+
+  /**
+   * Names of every tool_use block in the turn, in order, with repeats — a turn that calls Read
+   * three times contributes three entries. This is the population the tool histogram counts.
+   */
+  toolCalls: string[];
+
+  /**
+   * The serialised `input` of every tool_use block, concatenated. Only populated under
+   * `blockDetail`, because it is several times the size of `proseText` and no other command
+   * reads it. Counting it is what separates tool-call output from prose output.
+   */
+  toolCallText: string;
+
+  /**
+   * True when the turn carried a `thinking` or `redacted_thinking` block.
+   *
+   * Deliberately not a token count. The transcript stores the *summary* Claude Code was shown,
+   * never the raw chain of thought, and it is the raw one that is billed — measured at 2.6x the
+   * summary on turns that have one. Reasoning tokens are therefore recovered as the residual of
+   * billed output in `anatomy.ts`, not counted from this text.
+   */
+  hasThinking: boolean;
+
+  /**
+   * Legacy-BPE token count of everything that arrived between the previous turn and this one:
+   * tool results and user text. Only populated under `blockDetail`.
+   *
+   * Stored as a count rather than as text because tool results are the largest thing in a
+   * transcript by an order of magnitude. `anatomy` uses it to regress prefix growth on content
+   * class, which is how the compounding model gets checked instead of assumed.
+   */
+  incomingLegacyTokens: number;
+
   hasFence: boolean;
   outputTokens: number;
   inputTokens: number;
@@ -78,6 +113,27 @@ function injectionsIn(event: RawEvent): string[] {
   return [...found];
 }
 
+/** Every string reachable inside a value, joined — tool results nest text at varying depths. */
+function flattenText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(flattenText).join('\n');
+  if (value && typeof value === 'object') return Object.values(value).map(flattenText).join('\n');
+  return '';
+}
+
+/**
+ * What a user-role event contributes to the next request's prefix.
+ *
+ * This is the transcript's copy, which is an UPPER BOUND on what was actually sent: Claude Code
+ * truncates large tool output before the request, and the untruncated version is what gets
+ * written to disk. Measured across one corpus, only ~38% of stored tool-result tokens show up as
+ * prefix growth. Anything reading this must either restrict to small results or expect the bias.
+ */
+function incomingTokensIn(event: RawEvent): number {
+  if (event.type !== 'user') return 0;
+  return memoCountTokens(flattenText(event.message?.content));
+}
+
 function isUserPrompt(event: RawEvent): boolean {
   if (event.type !== 'user') return false;
   const content = event.message?.content;
@@ -90,6 +146,9 @@ interface Draft {
   model: string;
   timestamp: Date;
   proseParts: string[];
+  toolCalls: string[];
+  toolCallParts: string[];
+  hasThinking: boolean;
   kinds: Set<string>;
   hasFence: boolean;
   outputTokens: number;
@@ -100,7 +159,19 @@ interface Draft {
   usageSeen: boolean;
 }
 
-export async function analyzeSession(file: string): Promise<SessionAnalysis> {
+export interface AnalyzeOptions {
+  /**
+   * Retain per-block detail: the serialised tool_use inputs, and the token count of everything
+   * arriving between turns.
+   *
+   * Off by default and deliberately so. The tool_use text is hundreds of megabytes on the
+   * largest corpus here, and the incoming count runs the tokenizer over every tool result in
+   * the corpus. Only `anatomy` reads either, so every other command pays nothing for them.
+   */
+  blockDetail?: boolean;
+}
+
+export async function analyzeSession(file: string, options: AnalyzeOptions = {}): Promise<SessionAnalysis> {
   const drafts = new Map<string, Draft>();
   const order: string[] = [];
   let sessionId = 'unknown';
@@ -109,9 +180,11 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
   let pendingOneTime: string[] = [];
   let pendingPerTurn: string[] = [];
   let pendingUserPrompts = 0;
+  let pendingIncoming = 0;
   const attachedOneTime = new Map<string, string[]>();
   const attachedPerTurn = new Map<string, string[]>();
   const attachedPrompts = new Map<string, number>();
+  const attachedIncoming = new Map<string, number>();
 
   for await (const event of readRawEvents(file)) {
     if (event.sessionId) sessionId = event.sessionId;
@@ -122,6 +195,7 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
       else pendingPerTurn.push(text);
     }
     if (isUserPrompt(event)) pendingUserPrompts++;
+    if (options.blockDetail) pendingIncoming += incomingTokensIn(event);
 
     if (event.type !== 'assistant') continue;
     const id = event.message?.id;
@@ -134,6 +208,9 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
         model: event.message?.model ?? '',
         timestamp: new Date(event.timestamp ?? Date.now()),
         proseParts: [],
+        toolCalls: [],
+        toolCallParts: [],
+        hasThinking: false,
         kinds: new Set(),
         hasFence: false,
         outputTokens: 0,
@@ -149,9 +226,11 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
       attachedOneTime.set(id, pendingOneTime);
       attachedPerTurn.set(id, pendingPerTurn);
       attachedPrompts.set(id, pendingUserPrompts);
+      attachedIncoming.set(id, pendingIncoming);
       pendingOneTime = [];
       pendingPerTurn = [];
       pendingUserPrompts = 0;
+      pendingIncoming = 0;
     }
 
     const usage = event.message?.usage;
@@ -177,6 +256,17 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
         const text = (block as { text?: string }).text ?? '';
         if (text.includes('```')) draft.hasFence = true;
         draft.proseParts.push(stripFences(text));
+        continue;
+      }
+      if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+        draft.hasThinking = true;
+        continue;
+      }
+      if (block.type === 'tool_use') {
+        const name = block.name ?? 'unknown';
+        draft.toolCalls.push(name);
+        // The name travels on the wire with the input, so it belongs in the same count.
+        if (options.blockDetail) draft.toolCallParts.push(name, JSON.stringify(block.input ?? {}));
       }
     }
   }
@@ -192,6 +282,10 @@ export async function analyzeSession(file: string): Promise<SessionAnalysis> {
         proseText: draft.proseParts.join(''),
         onlyTextBlocks: draft.kinds.size === 1 && draft.kinds.has('text'),
         hasToolUse: draft.kinds.has('tool_use'),
+        toolCalls: draft.toolCalls,
+        toolCallText: draft.toolCallParts.join(''),
+        hasThinking: draft.hasThinking,
+        incomingLegacyTokens: attachedIncoming.get(id) ?? 0,
         hasFence: draft.hasFence,
         outputTokens: draft.outputTokens,
         inputTokens: draft.inputTokens,

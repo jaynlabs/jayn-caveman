@@ -1,7 +1,7 @@
 import { glob } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { analyzeSession, type SessionAnalysis } from './session.js';
+import { analyzeSession, type AnalyzeOptions, type SessionAnalysis } from './session.js';
 import { BpeCounter, calibrate, memoCountTokens } from './tokens.js';
 
 export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -47,6 +47,7 @@ export function dedupeSessions(sessions: readonly SessionAnalysis[]): SessionAna
 export async function loadSessions(
   roots: string | readonly string[] = DEFAULT_ROOT,
   liveSessionId?: string,
+  options: AnalyzeOptions = {},
 ): Promise<SessionAnalysis[]> {
   const analysed: SessionAnalysis[] = [];
   for (const root of typeof roots === 'string' ? [roots] : roots) {
@@ -56,7 +57,7 @@ export async function loadSessions(
 
     for (const file of files) {
       if (liveSessionId && basename(file, '.jsonl') === liveSessionId) continue;
-      const session = await analyzeSession(file);
+      const session = await analyzeSession(file, options);
       if (liveSessionId && session.sessionId === liveSessionId) continue;
       analysed.push(session);
     }
@@ -69,11 +70,14 @@ export interface LoadTarget {
   roots: readonly string[];
 }
 
-export async function loadGrouped(targets: readonly LoadTarget[]): Promise<Map<SessionAnalysis, string>> {
+export async function loadGrouped(
+  targets: readonly LoadTarget[],
+  options: AnalyzeOptions = {},
+): Promise<Map<SessionAnalysis, string>> {
   const labelOf = new Map<string, string>();
   const analysed: SessionAnalysis[] = [];
   for (const target of targets) {
-    for (const session of await loadSessions(target.roots)) {
+    for (const session of await loadSessions(target.roots, undefined, options)) {
       if (!labelOf.has(session.file)) labelOf.set(session.file, target.label);
       analysed.push(session);
     }

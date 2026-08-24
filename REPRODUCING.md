@@ -35,6 +35,7 @@ npm run cli -- compliance --root ~/corpora/alice,~/corpora/bob
 | `breakeven`  | the English-prose-per-prompt table and the crossing                  |
 | `trial`      | `R`, the compression ratio — **this one spends real money**          |
 | `curves`     | refits `curves/` from `data/` — the CI gate on our own numbers       |
+| `anatomy`    | what the bill is made of: billing lanes, content classes, tools      |
 
 ### `analyze` — the headline and the band
 
@@ -187,6 +188,39 @@ npm run cli -- curves --check  # fail if the committed file is stale; writes not
 `curves/` is generated and `data/` is the asset. `--check` runs in CI, so the thresholds in this
 repository are provably the ones the shipped observations produce — that is the one number here
 you can reproduce exactly, without any transcripts of your own.
+
+### `anatomy` — what the bill is made of
+
+```bash
+npm run cli -- anatomy --root $C/cofounder,$C/gauthier    # one block per corpus, plus a pooled one
+npm run cli -- anatomy --root $C/gustave --tools-only     # just the tool histogram
+```
+
+Not a caveman number — a property of the corpus. Three tables per corpus.
+
+**Lanes** is exact, straight out of the recorded `usage`: fresh input, cache read, cache write at
+each TTL, output. **Classes** splits billed output into reasoning, prose and tool-call JSON, and
+prices each of them twice — at the output rate alone, and fully loaded with the cache write and
+every subsequent re-read charged back to it. **Tools** is every `tool_use` block by name.
+
+Two things to know before quoting it.
+
+Reasoning tokens are a **residual**, not a count. Claude Code stores a summary of the chain of
+thought while the raw chain is what gets billed, so turns carrying a thinking block bill ~2.6x
+their transcribed text against ~1.45x — the calibration factor — for turns without one. Counting
+the summary would undercount reasoning about fourfold. Prose and tool JSON are counted; reasoning
+is what is left of billed output, and only on turns that actually carried a thinking block.
+
+The fully loaded column assumes output stays in the conversation and is re-read on every later
+turn. The command **measures that instead of asserting it**: the persistence fit at the bottom
+regresses prefix growth on each content class, using incoming tool results as a control whose
+coefficient is known to be ~1. Across the ten corpora the control lands at 0.86–1.15 and reasoning
+at 0.90–1.02 on nine of them, so reasoning does compound. Read the per-corpus fits, not the pooled
+one — pooling mixes corpora with different per-turn fixed overheads and the pooled fit is looser.
+
+Because the fit needs it, `anatomy` is the one command that loads transcripts with
+`blockDetail: true`, which retains tool-call text and tokenizes every tool result. It is
+substantially slower and hungrier than the others; `gauthier` wants `--max-old-space-size`.
 
 ## Data
 
