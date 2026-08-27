@@ -1,6 +1,21 @@
 import { readRawEvents, type RawEvent } from './events.js';
 import { memoCountTokens } from './tokens.js';
 
+export interface ToolCallDetail {
+  id?: string;
+  name: string;
+  /** Slice of `Turn.toolCallText` occupied by this call. */
+  start: number;
+  end: number;
+}
+
+export interface ToolResultDetail {
+  toolUseId?: string;
+  name: string;
+  /** Legacy-BPE count of the result payload stored in the transcript. */
+  legacyTokens: number;
+}
+
 export interface Turn {
   index: number;
 
@@ -27,6 +42,9 @@ export interface Turn {
    */
   toolCallText: string;
 
+  /** Per-call boundaries retained only under `blockDetail`. */
+  toolCallDetails: ToolCallDetail[];
+
   /**
    * True when the turn carried a `thinking` or `redacted_thinking` block.
    *
@@ -46,6 +64,9 @@ export interface Turn {
    * class, which is how the compounding model gets checked instead of assumed.
    */
   incomingLegacyTokens: number;
+
+  /** Tool results arriving before this turn, matched back to their call by `tool_use_id`. */
+  incomingToolResults: ToolResultDetail[];
 
   hasFence: boolean;
   outputTokens: number;
@@ -134,6 +155,21 @@ function incomingTokensIn(event: RawEvent): number {
   return memoCountTokens(flattenText(event.message?.content));
 }
 
+function toolResultsIn(event: RawEvent, toolNameById: ReadonlyMap<string, string>): ToolResultDetail[] {
+  if (event.type !== 'user' || !Array.isArray(event.message?.content)) return [];
+  const results: ToolResultDetail[] = [];
+  for (const block of event.message.content) {
+    if (block?.type !== 'tool_result') continue;
+    const toolUseId = block.tool_use_id;
+    results.push({
+      ...(toolUseId === undefined ? {} : { toolUseId }),
+      name: toolUseId === undefined ? 'unknown' : (toolNameById.get(toolUseId) ?? 'unknown'),
+      legacyTokens: memoCountTokens(flattenText(block.content)),
+    });
+  }
+  return results;
+}
+
 function isUserPrompt(event: RawEvent): boolean {
   if (event.type !== 'user') return false;
   const content = event.message?.content;
@@ -147,7 +183,7 @@ interface Draft {
   timestamp: Date;
   proseParts: string[];
   toolCalls: string[];
-  toolCallParts: string[];
+  toolCallParts: Array<{ id?: string; name: string; text: string }>;
   hasThinking: boolean;
   kinds: Set<string>;
   hasFence: boolean;
@@ -181,10 +217,13 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
   let pendingPerTurn: string[] = [];
   let pendingUserPrompts = 0;
   let pendingIncoming = 0;
+  let pendingToolResults: ToolResultDetail[] = [];
+  const toolNameById = new Map<string, string>();
   const attachedOneTime = new Map<string, string[]>();
   const attachedPerTurn = new Map<string, string[]>();
   const attachedPrompts = new Map<string, number>();
   const attachedIncoming = new Map<string, number>();
+  const attachedToolResults = new Map<string, ToolResultDetail[]>();
 
   for await (const event of readRawEvents(file)) {
     if (event.sessionId) sessionId = event.sessionId;
@@ -195,7 +234,10 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
       else pendingPerTurn.push(text);
     }
     if (isUserPrompt(event)) pendingUserPrompts++;
-    if (options.blockDetail) pendingIncoming += incomingTokensIn(event);
+    if (options.blockDetail) {
+      pendingIncoming += incomingTokensIn(event);
+      pendingToolResults.push(...toolResultsIn(event, toolNameById));
+    }
 
     if (event.type !== 'assistant') continue;
     const id = event.message?.id;
@@ -227,10 +269,12 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
       attachedPerTurn.set(id, pendingPerTurn);
       attachedPrompts.set(id, pendingUserPrompts);
       attachedIncoming.set(id, pendingIncoming);
+      attachedToolResults.set(id, pendingToolResults);
       pendingOneTime = [];
       pendingPerTurn = [];
       pendingUserPrompts = 0;
       pendingIncoming = 0;
+      pendingToolResults = [];
     }
 
     const usage = event.message?.usage;
@@ -265,8 +309,15 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
       if (block.type === 'tool_use') {
         const name = block.name ?? 'unknown';
         draft.toolCalls.push(name);
+        if (block.id !== undefined) toolNameById.set(block.id, name);
         // The name travels on the wire with the input, so it belongs in the same count.
-        if (options.blockDetail) draft.toolCallParts.push(name, JSON.stringify(block.input ?? {}));
+        if (options.blockDetail) {
+          draft.toolCallParts.push({
+            ...(block.id === undefined ? {} : { id: block.id }),
+            name,
+            text: name + JSON.stringify(block.input ?? {}),
+          });
+        }
       }
     }
   }
@@ -274,6 +325,18 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
   const turns: Turn[] = order
     .map((id, index) => {
       const draft = drafts.get(id)!;
+      const toolCallText = draft.toolCallParts.map((part) => part.text).join('');
+      let toolOffset = 0;
+      const toolCallDetails = draft.toolCallParts.map((part) => {
+        const start = toolOffset;
+        toolOffset += part.text.length;
+        return {
+          ...(part.id === undefined ? {} : { id: part.id }),
+          name: part.name,
+          start,
+          end: toolOffset,
+        };
+      });
       return {
         index,
         id,
@@ -283,9 +346,11 @@ export async function analyzeSession(file: string, options: AnalyzeOptions = {})
         onlyTextBlocks: draft.kinds.size === 1 && draft.kinds.has('text'),
         hasToolUse: draft.kinds.has('tool_use'),
         toolCalls: draft.toolCalls,
-        toolCallText: draft.toolCallParts.join(''),
+        toolCallText,
+        toolCallDetails,
         hasThinking: draft.hasThinking,
         incomingLegacyTokens: attachedIncoming.get(id) ?? 0,
+        incomingToolResults: attachedToolResults.get(id) ?? [],
         hasFence: draft.hasFence,
         outputTokens: draft.outputTokens,
         inputTokens: draft.inputTokens,

@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fitPersistence, loadedCostOf, splitOutput, toolHistogram, type ClassSplit } from './anatomy.js';
+import {
+  anatomyOf,
+  attribute,
+  fitPersistence,
+  splitOutput,
+  toolHistogram,
+  type ClassSplit,
+} from './anatomy.js';
 import type { SessionAnalysis, Turn } from '../transcript/session.js';
 import type { TokenCounter } from '../transcript/tokens.js';
 
 const MODEL = 'claude-opus-4-6';
 const TS = new Date('2026-01-01T00:00:00Z');
-const IN = 5 / 1_000_000;
-const OUT = 25 / 1_000_000;
 
 function turn(overrides: Partial<Turn> = {}): Turn {
   return {
@@ -20,8 +25,10 @@ function turn(overrides: Partial<Turn> = {}): Turn {
     hasToolUse: false,
     toolCalls: [],
     toolCallText: '',
+    toolCallDetails: [],
     hasThinking: false,
     incomingLegacyTokens: 0,
+    incomingToolResults: [],
     hasFence: false,
     outputTokens: 0,
     inputTokens: 0,
@@ -78,39 +85,6 @@ test('counted text above billed output is floored and reported rather than hidde
   assert.equal(split.overflowTokens, 150);
 });
 
-test('fully loaded cost charges output once, the cache write once, then a read per later turn', () => {
-  const turns = [
-    turn({ outputTokens: 100, cacheWrite5m: 500 }),
-    turn({ index: 1, cacheWrite5m: 500, cacheRead: 1000 }),
-    turn({ index: 2, cacheWrite5m: 500, cacheRead: 2000 }),
-  ];
-  const cost = loadedCostOf(turns, [100, 0, 0])!;
-
-  assert.ok(Math.abs(cost.outputUSD - 100 * OUT) < 1e-12);
-  // written at turn 2 (1.25x input), then read at turn 3 (0.1x input)
-  const expected = 100 * OUT + 100 * IN * 1.25 + 100 * IN * 0.1;
-  assert.ok(Math.abs(cost.totalUSD - expected) < 1e-12);
-  assert.ok(cost.totalUSD > cost.outputUSD, 'compounding must never make output cheaper');
-});
-
-test('the longer the session, the more a single output token costs', () => {
-  const short = [turn({ outputTokens: 100, cacheWrite5m: 500 }), turn({ index: 1, cacheRead: 1000 })];
-  const long = [
-    turn({ outputTokens: 100, cacheWrite5m: 500 }),
-    turn({ index: 1, cacheRead: 1000 }),
-    turn({ index: 2, cacheRead: 2000 }),
-    turn({ index: 3, cacheRead: 3000 }),
-  ];
-  const a = loadedCostOf(short, [100, 0])!;
-  const b = loadedCostOf(long, [100, 0, 0, 0])!;
-  assert.ok(b.totalUSD > a.totalUSD, 'each extra turn re-reads the same tokens again');
-  assert.equal(a.outputUSD.toFixed(12), b.outputUSD.toFixed(12), 'the output-rate leg is unchanged');
-});
-
-test('an unpriced model yields no loaded cost rather than a wrong one', () => {
-  assert.equal(loadedCostOf([turn({ model: 'some-model-we-do-not-price', outputTokens: 100 })], [100]), null);
-});
-
 test('the tool histogram counts every call, and turns and sessions separately', () => {
   const stats = toolHistogram([
     session([turn({ toolCalls: ['Bash', 'Bash', 'Read'] }), turn({ index: 1, toolCalls: ['Bash'] })], 'a'),
@@ -126,6 +100,73 @@ test('the tool histogram counts every call, and turns and sessions separately', 
   assert.equal(read.calls, 2);
   assert.equal(read.sessions, 2);
   assert.equal(stats[0]!.name, 'Bash', 'sorted by call count');
+});
+
+test('tool calls and results keep their cache costs separate', async () => {
+  const writeCall = 'w'.repeat(100);
+  const bashCall = 'b'.repeat(10);
+  const report = await anatomyOf(
+    'tools',
+    [
+      session([
+        turn({
+          id: 'msg_0',
+          outputTokens: 100,
+          cacheWrite1h: 1000,
+          hasToolUse: true,
+          toolCalls: ['Write'],
+          toolCallText: writeCall,
+          toolCallDetails: [{ id: 'write-1', name: 'Write', start: 0, end: writeCall.length }],
+        }),
+        turn({
+          index: 1,
+          id: 'msg_1',
+          outputTokens: 10,
+          cacheRead: 1000,
+          cacheWrite1h: 400,
+          hasToolUse: true,
+          toolCalls: ['Bash'],
+          toolCallText: bashCall,
+          toolCallDetails: [{ id: 'bash-1', name: 'Bash', start: 0, end: bashCall.length }],
+          incomingLegacyTokens: 300,
+          incomingToolResults: [{ toolUseId: 'write-1', name: 'Write', legacyTokens: 300 }],
+        }),
+        turn({
+          index: 2,
+          id: 'msg_2',
+          outputTokens: 1,
+          proseText: 'x',
+          cacheRead: 1400,
+          cacheWrite1h: 10,
+        }),
+      ]),
+    ],
+    perChar,
+    1,
+  );
+
+  const write = report.tools.find((tool) => tool.name === 'Write')!;
+  assert.equal(write.callTokens, 100);
+  assert.equal(write.results, 1);
+  assert.equal(write.resultTokens, 300);
+  assert.equal(write.callWrittenTokens, 100);
+  assert.equal(write.resultWrittenTokens, 300);
+  assert.equal(write.callReadTokens, 100);
+  assert.equal(write.resultReadTokens, 300);
+  assert.equal(write.callP50Tokens, 100);
+  assert.equal(write.callP95Tokens, 100);
+  assert.equal(write.resultP50Tokens, 300);
+  assert.equal(write.resultP95Tokens, 300);
+  assert.equal(write.callTotalUSD, write.callOutputUSD + write.callWriteUSD + write.callReadUSD);
+  assert.equal(write.resultTotalUSD, write.resultWriteUSD + write.resultReadUSD);
+  assert.equal(write.totalUSD, write.callTotalUSD + write.resultTotalUSD);
+  assert.equal(report.tools[0]!.name, 'Write', 'dollar contribution, not call count, determines order');
+  assert.equal(report.toolResultTotal, 1);
+  assert.ok(
+    Math.abs(report.toolBillUSD - report.toolCallBillUSD - report.toolResultBillUSD) < 1e-12,
+    'the old combined subtotal remains a reconciliation check',
+  );
+  assert.ok(report.toolBillUSD > write.totalUSD, 'the subtotal includes the smaller Bash exchange too');
 });
 
 test('the persistence fit recovers coefficients from a prefix built to known rules', () => {
@@ -190,4 +231,67 @@ test('pairs whose incoming context is large are excluded, because the transcript
     null,
     'the only pair is filtered, so nothing to fit',
   );
+});
+
+test('attribution splits a turn between the preamble, the echo of prior output, and what was fed in', () => {
+  // turn 0 writes the preamble; turn 1 writes back turn 0's 100 output tokens plus 400 fed in
+  const turns = [
+    turn({ index: 0, id: 'msg_0', outputTokens: 100, cacheWrite1h: 1000 }),
+    turn({ index: 1, id: 'msg_1', outputTokens: 0, cacheWrite1h: 500, cacheRead: 1000 }),
+  ];
+  const one = session(turns);
+  const split: ClassSplit = { reasoning: [60, 0], prose: [40, 0], toolCalls: [0, 0], overflowTokens: 0 };
+  const a = attribute([one], new Map([[one, split]]));
+
+  assert.equal(a.origins.preamble.written, 1000);
+  assert.equal(a.origins.fedIn.written, 400, '500 written minus the 100 echoed');
+  assert.equal(a.origins.reasoning.written, 60, 'echo split 60/40 by the class mix of turn 0');
+  assert.equal(a.origins.prose.written, 40);
+  // turn 1 read the 1000-token preamble and nothing else was in the prefix yet
+  assert.equal(a.origins.preamble.read, 1000);
+  assert.equal(a.origins.fedIn.read, 0);
+});
+
+test('reads are charged against the real prefix, never projected to the end of the session', () => {
+  // 100 output tokens at turn 0, then two turns that read a prefix which never grows
+  const turns = [
+    turn({ index: 0, id: 'msg_0', outputTokens: 100, cacheWrite1h: 100 }),
+    turn({ index: 1, id: 'msg_1', cacheRead: 100 }),
+    turn({ index: 2, id: 'msg_2', cacheRead: 100 }),
+  ];
+  const one = session(turns);
+  const split: ClassSplit = {
+    reasoning: [0, 0, 0],
+    prose: [100, 0, 0],
+    toolCalls: [0, 0, 0],
+    overflowTokens: 0,
+  };
+  const a = attribute([one], new Map([[one, split]]));
+  assert.equal(a.origins.preamble.read + a.origins.prose.read, 200, 'exactly the two billed reads');
+  assert.equal(a.identityRatio, 1, 'carried prefix must equal what was billed');
+});
+
+test('a prefix that shrank is rescaled to the billed size instead of inventing history', () => {
+  const turns = [
+    turn({ index: 0, id: 'msg_0', outputTokens: 0, cacheWrite1h: 10_000 }),
+    turn({ index: 1, id: 'msg_1', cacheRead: 2000 }), // compacted: 10k prefix became 2k
+  ];
+  const one = session(turns);
+  const split: ClassSplit = { reasoning: [0, 0], prose: [0, 0], toolCalls: [0, 0], overflowTokens: 0 };
+  const a = attribute([one], new Map([[one, split]]));
+  assert.equal(a.compactedTokens, 8000);
+  assert.equal(a.identityRatio, 1, 'after rescaling, the carry matches the bill exactly');
+  assert.equal(a.origins.preamble.read, 2000, 'only what was billed is attributed');
+});
+
+test('output the split could not classify is not credited to any class', () => {
+  const turns = [
+    turn({ index: 0, id: 'msg_0', outputTokens: 100, cacheWrite1h: 100 }),
+    turn({ index: 1, id: 'msg_1', cacheWrite1h: 100, cacheRead: 100 }),
+  ];
+  const one = session(turns);
+  const split: ClassSplit = { reasoning: [0, 0], prose: [0, 0], toolCalls: [0, 0], overflowTokens: 0 };
+  const a = attribute([one], new Map([[one, split]]));
+  assert.equal(a.origins.reasoning.written + a.origins.prose.written + a.origins.toolCalls.written, 0);
+  assert.equal(a.origins.fedIn.written, 100, 'unclassified echo falls through to fedIn');
 });

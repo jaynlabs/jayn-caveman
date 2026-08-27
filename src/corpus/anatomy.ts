@@ -1,7 +1,6 @@
 import { price } from '../billing/pricing.js';
-import { replayDelta } from '../transcript/replay.js';
 import type { SessionAnalysis, Turn } from '../transcript/session.js';
-import type { TokenCounter } from '../transcript/tokens.js';
+import { memoCountTokens, type TokenCounter } from '../transcript/tokens.js';
 
 /**
  * What a bill is made of, as opposed to how big it is.
@@ -87,6 +86,74 @@ export interface ClassSplit {
   overflowTokens: number;
 }
 
+interface ToolTokenSample {
+  name: string;
+  tokens: number;
+}
+
+interface ToolTurnBreakdown {
+  calls: Map<string, number>;
+  results: Map<string, number>;
+  callSamples: ToolTokenSample[];
+  resultSamples: ToolTokenSample[];
+  incomingTokens: number;
+}
+
+interface ToolSessionBreakdown {
+  turns: ToolTurnBreakdown[];
+}
+
+const addTo = (map: Map<string, number>, key: string, amount: number): void => {
+  map.set(key, (map.get(key) ?? 0) + amount);
+};
+
+function toolBreakdown(
+  session: SessionAnalysis,
+  split: ClassSplit,
+  calibration: number,
+): ToolSessionBreakdown {
+  const turns = session.turns.map((turn, turnIndex): ToolTurnBreakdown => {
+    const calls = new Map<string, number>();
+    const callParts = turn.toolCallDetails.map((detail) => ({
+      name: detail.name,
+      tokens: memoCountTokens(turn.toolCallText.slice(detail.start, detail.end)),
+    }));
+    const rawCallTokens = callParts.reduce((sum, call) => sum + call.tokens, 0);
+    const billedCallTokens = split.toolCalls[turnIndex] ?? 0;
+    const callSamples = callParts.map((call) => ({
+      ...call,
+      tokens:
+        rawCallTokens > 0
+          ? billedCallTokens * (call.tokens / rawCallTokens)
+          : callParts.length > 0
+            ? billedCallTokens / callParts.length
+            : 0,
+    }));
+    for (const call of callSamples) {
+      addTo(calls, call.name, call.tokens);
+    }
+
+    const results = new Map<string, number>();
+    const resultSamples = turn.incomingToolResults.map((result) => ({
+      name: result.name,
+      tokens: result.legacyTokens * calibration,
+    }));
+    for (const result of resultSamples) {
+      addTo(results, result.name, result.tokens);
+    }
+
+    return {
+      calls,
+      results,
+      callSamples,
+      resultSamples,
+      incomingTokens: turn.incomingLegacyTokens * calibration,
+    };
+  });
+
+  return { turns };
+}
+
 export async function splitOutput(session: SessionAnalysis, counter: TokenCounter): Promise<ClassSplit> {
   const reasoning: number[] = [];
   const prose: number[] = [];
@@ -110,36 +177,342 @@ export async function splitOutput(session: SessionAnalysis, counter: TokenCounte
 }
 
 /**
- * What a class of output actually costs, once the conversation is taken into account.
+ * Where every billed token came from.
  *
- * `replayDelta` prices the counterfactual where those tokens were never emitted: it charges them
- * at the output rate on the turn they appear, at the cache-write rate on the next turn, and at
- * the cache-read rate on every turn after that. Negating it gives the fully loaded cost. The
- * naive output-rate-only figure is returned alongside, because the gap between them is the whole
- * point of the exercise.
+ * Five origins: the session preamble (system prompt + tool definitions + first user message), the
+ * model's own output echoed back — split into the same three classes — and everything fed in
+ * (tool results, user text, hook injections, reminders).
+ *
+ * This replaces an earlier attempt that priced each class with `replayDelta`, charging it a
+ * cache read on every remaining turn of the session. That overstates: real conversations compact,
+ * get context-edited and lose their prefix, so tokens do not survive to the end. On this library
+ * the modelled figure came out at 4.39x the output rate against a measured 2.43x.
+ *
+ * So nothing here is modelled. Writes are attributed by differencing `cache_creation` against the
+ * previous turn's billed output. Reads are attributed by carrying the composition of the prefix
+ * and splitting each turn's OBSERVED `cache_read` across it. `identityRatio` is the audit: the
+ * carried composition divided by what was actually billed. Far from 1.0 means this is wrong.
  */
-export function loadedCostOf(
-  turns: Turn[],
-  tokensPerTurn: number[],
-): { outputUSD: number; totalUSD: number } | null {
-  const delta = replayDelta(
-    turns,
-    tokensPerTurn,
-    () => 0,
-    () => 0,
-  );
-  if (!delta) return null;
-  return { outputUSD: -delta.outputUSD, totalUSD: -delta.totalUSD };
+export type Origin = 'preamble' | ContentClass | 'fedIn';
+
+export const ORIGINS: Origin[] = ['preamble', 'reasoning', 'prose', 'toolCalls', 'fedIn'];
+
+export const ORIGIN_LABEL: Record<Origin, string> = {
+  preamble: 'preamble (system+tools)',
+  reasoning: 'reasoning, echoed back',
+  prose: 'prose, echoed back',
+  toolCalls: 'tool calls, echoed back',
+  fedIn: 'fed in (tool results, you)',
+};
+
+export interface OriginTotals {
+  written: number;
+  read: number;
+  writeUSD: number;
+  readUSD: number;
+}
+
+export interface Attribution {
+  origins: Record<Origin, OriginTotals>;
+  /** The output lane alone, per class — what generating the tokens cost before any echo. */
+  classOutputUSD: Record<ContentClass, number>;
+  /** Carried prefix / billed cache_read. The audit on the whole read side. */
+  identityRatio: number;
+  /** Prefix tokens dropped because the billed prefix shrank: compaction and context editing. */
+  compactedTokens: number;
+  toolCosts: Map<string, ToolCostTotals>;
+  unpriced: boolean;
+}
+
+export interface ToolCostTotals {
+  results: number;
+  callTokens: number;
+  resultTokens: number;
+  callWrittenTokens: number;
+  callReadTokens: number;
+  resultWrittenTokens: number;
+  resultReadTokens: number;
+  callOutputUSD: number;
+  callWriteUSD: number;
+  callReadUSD: number;
+  resultWriteUSD: number;
+  resultReadUSD: number;
+  callSizes: number[];
+  resultSizes: number[];
+}
+
+const isColdStart = (turn: Turn) => turn.cacheRead === 0 && turn.cacheWrite5m + turn.cacheWrite1h > 0;
+
+function zeroOrigins(): Record<Origin, OriginTotals> {
+  return Object.fromEntries(
+    ORIGINS.map((origin) => [origin, { written: 0, read: 0, writeUSD: 0, readUSD: 0 }]),
+  ) as Record<Origin, OriginTotals>;
+}
+
+function zeroToolCost(): ToolCostTotals {
+  return {
+    results: 0,
+    callTokens: 0,
+    resultTokens: 0,
+    callWrittenTokens: 0,
+    callReadTokens: 0,
+    resultWrittenTokens: 0,
+    resultReadTokens: 0,
+    callOutputUSD: 0,
+    callWriteUSD: 0,
+    callReadUSD: 0,
+    resultWriteUSD: 0,
+    resultReadUSD: 0,
+    callSizes: [],
+    resultSizes: [],
+  };
+}
+
+function toolCost(costs: Map<string, ToolCostTotals>, name: string): ToolCostTotals {
+  const existing = costs.get(name);
+  if (existing) return existing;
+  const created = zeroToolCost();
+  costs.set(name, created);
+  return created;
+}
+
+function distribute(
+  total: number,
+  weights: ReadonlyMap<string, number>,
+  visit: (name: string, tokens: number) => void,
+) {
+  const denominator = [...weights.values()].reduce((sum, tokens) => sum + tokens, 0);
+  if (total <= 0 || denominator <= 0) return;
+  for (const [name, weight] of weights) visit(name, total * (weight / denominator));
+}
+
+export function attribute(
+  sessions: readonly SessionAnalysis[],
+  splits: ReadonlyMap<SessionAnalysis, ClassSplit>,
+  toolBreakdowns: ReadonlyMap<SessionAnalysis, ToolSessionBreakdown> = new Map(),
+): Attribution {
+  const origins = zeroOrigins();
+  const toolCosts = new Map<string, ToolCostTotals>();
+  const classOutputUSD = Object.fromEntries(CLASSES.map((c) => [c, 0])) as Record<ContentClass, number>;
+  let carried = 0;
+  let billedRead = 0;
+  let compactedTokens = 0;
+  let unpriced = false;
+
+  for (const session of sessions) {
+    const split = splits.get(session);
+    const toolSplit = toolBreakdowns.get(session);
+    const inPrefixOf = Object.fromEntries(ORIGINS.map((o) => [o, 0])) as Record<Origin, number>;
+    const callPrefix = new Map<string, number>();
+    const resultPrefix = new Map<string, number>();
+    const sum = () => ORIGINS.reduce((total, o) => total + inPrefixOf[o], 0);
+
+    for (const [i, turn] of session.turns.entries()) {
+      const toolTurn = toolSplit?.turns[i];
+      for (const call of toolTurn?.callSamples ?? []) {
+        toolCost(toolCosts, call.name).callSizes.push(call.tokens);
+      }
+      for (const result of toolTurn?.resultSamples ?? []) {
+        const tool = toolCost(toolCosts, result.name);
+        tool.results++;
+        tool.resultTokens += result.tokens;
+        tool.resultSizes.push(result.tokens);
+      }
+      if (split) {
+        for (const contentClass of CLASSES) {
+          const tokens = split[contentClass][i] ?? 0;
+          if (tokens <= 0) continue;
+          const cost = price(turn.model, turn.timestamp, { ...ZERO, outputTokens: tokens }).costUSD;
+          if (cost === null) unpriced = true;
+          else classOutputUSD[contentClass] += cost;
+          if (contentClass === 'toolCalls' && toolTurn) {
+            distribute(tokens, toolTurn.calls, (name, allocated) => {
+              const tool = toolCost(toolCosts, name);
+              tool.callTokens += allocated;
+              if (cost !== null) tool.callOutputUSD += cost * (allocated / tokens);
+            });
+          }
+        }
+      }
+
+      // --- read side, against the prefix as the API actually billed it
+      let inPrefix = sum();
+      if (turn.cacheRead > 0 && inPrefix > turn.cacheRead) {
+        // the billed prefix shrank: compaction, context editing, or a dropped prefix. Rescale so
+        // later turns keep attributing against something real instead of a phantom history.
+        compactedTokens += inPrefix - turn.cacheRead;
+        const keep = turn.cacheRead / inPrefix;
+        for (const origin of ORIGINS) inPrefixOf[origin] *= keep;
+        for (const [name, tokens] of callPrefix) callPrefix.set(name, tokens * keep);
+        for (const [name, tokens] of resultPrefix) resultPrefix.set(name, tokens * keep);
+        inPrefix = turn.cacheRead;
+      }
+      if (turn.cacheRead > 0 && inPrefix > 0) {
+        carried += inPrefix;
+        billedRead += turn.cacheRead;
+        const cost = price(turn.model, turn.timestamp, { ...ZERO, cacheRead: turn.cacheRead }).costUSD;
+        if (cost === null) unpriced = true;
+        else {
+          const perToken = cost / turn.cacheRead;
+          for (const origin of ORIGINS) {
+            const tokens = turn.cacheRead * (inPrefixOf[origin] / inPrefix);
+            origins[origin].read += tokens;
+            origins[origin].readUSD += tokens * perToken;
+          }
+          for (const [name, amount] of callPrefix) {
+            const tokens = turn.cacheRead * (amount / inPrefix);
+            const tool = toolCost(toolCosts, name);
+            tool.callReadTokens += tokens;
+            tool.callReadUSD += tokens * perToken;
+          }
+          for (const [name, amount] of resultPrefix) {
+            const tokens = turn.cacheRead * (amount / inPrefix);
+            const tool = toolCost(toolCosts, name);
+            tool.resultReadTokens += tokens;
+            tool.resultReadUSD += tokens * perToken;
+          }
+        }
+      }
+
+      // --- write side, by differencing against the previous turn's output
+      const write = turn.cacheWrite5m + turn.cacheWrite1h;
+      if (write === 0) continue;
+      const writeCost = price(turn.model, turn.timestamp, {
+        ...ZERO,
+        cacheWrite5m: turn.cacheWrite5m,
+        cacheWrite1h: turn.cacheWrite1h,
+      }).costUSD;
+      if (writeCost === null) {
+        unpriced = true;
+        continue;
+      }
+      const perWrite = writeCost / write;
+      const add = (origin: Origin, tokens: number) => {
+        origins[origin].written += tokens;
+        origins[origin].writeUSD += tokens * perWrite;
+        inPrefixOf[origin] += tokens;
+      };
+      const addCall = (name: string, tokens: number) => {
+        const tool = toolCost(toolCosts, name);
+        tool.callWrittenTokens += tokens;
+        tool.callWriteUSD += tokens * perWrite;
+        addTo(callPrefix, name, tokens);
+      };
+      const addResult = (name: string, tokens: number) => {
+        const tool = toolCost(toolCosts, name);
+        tool.resultWrittenTokens += tokens;
+        tool.resultWriteUSD += tokens * perWrite;
+        addTo(resultPrefix, name, tokens);
+      };
+
+      const prev = i > 0 ? session.turns[i - 1] : undefined;
+      if (prev && isColdStart(turn)) {
+        // the whole prefix was re-written after expiry, not just the new part; charge it back to
+        // whatever is already in there rather than inventing new content
+        const total = sum();
+        if (total > 0) {
+          for (const origin of ORIGINS) {
+            const tokens = write * (inPrefixOf[origin] / total);
+            origins[origin].written += tokens;
+            origins[origin].writeUSD += tokens * perWrite;
+          }
+          for (const [name, amount] of callPrefix) {
+            const tokens = write * (amount / total);
+            const tool = toolCost(toolCosts, name);
+            tool.callWrittenTokens += tokens;
+            tool.callWriteUSD += tokens * perWrite;
+          }
+          for (const [name, amount] of resultPrefix) {
+            const tokens = write * (amount / total);
+            const tool = toolCost(toolCosts, name);
+            tool.resultWrittenTokens += tokens;
+            tool.resultWriteUSD += tokens * perWrite;
+          }
+        } else add('fedIn', write);
+        continue;
+      }
+      if (!prev) {
+        add('preamble', write);
+        continue;
+      }
+
+      const echoed = Math.min(write, prev.outputTokens);
+      let toolEchoed = 0;
+      if (echoed > 0) {
+        const prior = CLASSES.map((c) => split?.[c][i - 1] ?? 0);
+        const denominator = prior.reduce((a, b) => a + b, 0);
+        if (denominator > 0) {
+          CLASSES.forEach((contentClass, k) => {
+            const tokens = echoed * (prior[k]! / denominator);
+            add(contentClass, tokens);
+            if (contentClass === 'toolCalls') toolEchoed = tokens;
+          });
+        } else add('fedIn', echoed); // output we could not classify; do not credit it to a class
+      }
+      const previousTools = toolSplit?.turns[i - 1];
+      if (previousTools) distribute(toolEchoed, previousTools.calls, (name, tokens) => addCall(name, tokens));
+
+      const fedIn = write - echoed;
+      add('fedIn', fedIn);
+      if (toolTurn) {
+        const resultSeen = [...toolTurn.results.values()].reduce((sum, tokens) => sum + tokens, 0);
+        const resultShare =
+          resultSeen <= 0
+            ? 0
+            : toolTurn.incomingTokens > 0
+              ? Math.min(1, resultSeen / toolTurn.incomingTokens)
+              : 1;
+        distribute(fedIn * resultShare, toolTurn.results, (name, tokens) => addResult(name, tokens));
+      }
+    }
+  }
+
+  return {
+    origins,
+    classOutputUSD,
+    identityRatio: billedRead === 0 ? 1 : carried / billedRead,
+    compactedTokens,
+    toolCosts,
+    unpriced,
+  };
 }
 
 export interface ToolStat {
   name: string;
   calls: number;
+  results: number;
   sessions: number;
   turns: number;
+  callTokens: number;
+  resultTokens: number;
+  callWrittenTokens: number;
+  callReadTokens: number;
+  resultWrittenTokens: number;
+  resultReadTokens: number;
+  callP50Tokens: number;
+  callP95Tokens: number;
+  resultP50Tokens: number;
+  resultP95Tokens: number;
+  callOutputUSD: number;
+  callWriteUSD: number;
+  callReadUSD: number;
+  resultWriteUSD: number;
+  resultReadUSD: number;
+  callTotalUSD: number;
+  resultTotalUSD: number;
+  totalUSD: number;
 }
 
-export function toolHistogram(sessions: readonly SessionAnalysis[]): ToolStat[] {
+function percentile(values: readonly number[], fraction: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * fraction) - 1] ?? 0;
+}
+
+export function toolHistogram(
+  sessions: readonly SessionAnalysis[],
+  costs: ReadonlyMap<string, ToolCostTotals> = new Map(),
+): ToolStat[] {
   const calls = new Map<string, number>();
   const turns = new Map<string, number>();
   const sessionsWith = new Map<string, Set<string>>();
@@ -158,14 +531,39 @@ export function toolHistogram(sessions: readonly SessionAnalysis[]): ToolStat[] 
     }
   }
 
-  return [...calls.entries()]
-    .map(([name, count]) => ({
-      name,
-      calls: count,
-      sessions: sessionsWith.get(name)?.size ?? 0,
-      turns: turns.get(name) ?? 0,
-    }))
-    .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
+  const names = new Set([...calls.keys(), ...costs.keys()]);
+  return [...names]
+    .map((name) => {
+      const cost = costs.get(name) ?? zeroToolCost();
+      const callTotalUSD = cost.callOutputUSD + cost.callWriteUSD + cost.callReadUSD;
+      const resultTotalUSD = cost.resultWriteUSD + cost.resultReadUSD;
+      return {
+        name,
+        calls: calls.get(name) ?? 0,
+        results: cost.results,
+        sessions: sessionsWith.get(name)?.size ?? 0,
+        turns: turns.get(name) ?? 0,
+        callTokens: cost.callTokens,
+        resultTokens: cost.resultTokens,
+        callWrittenTokens: cost.callWrittenTokens,
+        callReadTokens: cost.callReadTokens,
+        resultWrittenTokens: cost.resultWrittenTokens,
+        resultReadTokens: cost.resultReadTokens,
+        callP50Tokens: percentile(cost.callSizes, 0.5),
+        callP95Tokens: percentile(cost.callSizes, 0.95),
+        resultP50Tokens: percentile(cost.resultSizes, 0.5),
+        resultP95Tokens: percentile(cost.resultSizes, 0.95),
+        callOutputUSD: cost.callOutputUSD,
+        callWriteUSD: cost.callWriteUSD,
+        callReadUSD: cost.callReadUSD,
+        resultWriteUSD: cost.resultWriteUSD,
+        resultReadUSD: cost.resultReadUSD,
+        callTotalUSD,
+        resultTotalUSD,
+        totalUSD: callTotalUSD + resultTotalUSD,
+      };
+    })
+    .sort((a, b) => b.totalUSD - a.totalUSD || b.calls - a.calls || a.name.localeCompare(b.name));
 }
 
 /**
@@ -306,10 +704,18 @@ export interface Anatomy {
   classOutputUSD: Record<ContentClass, number>;
   classLoadedUSD: Record<ContentClass, number>;
   overflowTokens: number;
-  modelledSessions: number;
+
+  origins: Record<Origin, OriginTotals>;
+  originUSD: Record<Origin, number>;
+  identityRatio: number;
+  compactedTokens: number;
 
   tools: ToolStat[];
   toolCallTotal: number;
+  toolResultTotal: number;
+  toolCallBillUSD: number;
+  toolResultBillUSD: number;
+  toolBillUSD: number;
   persistence: PersistenceFit | null;
 }
 
@@ -322,14 +728,12 @@ export async function anatomyOf(
   const lanesTokens = Object.fromEntries(LANES.map((lane) => [lane, 0])) as Record<Lane, number>;
   const lanesUSD = Object.fromEntries(LANES.map((lane) => [lane, 0])) as Record<Lane, number>;
   const classTokens = Object.fromEntries(CLASSES.map((c) => [c, 0])) as Record<ContentClass, number>;
-  const classOutputUSD = Object.fromEntries(CLASSES.map((c) => [c, 0])) as Record<ContentClass, number>;
-  const classLoadedUSD = Object.fromEntries(CLASSES.map((c) => [c, 0])) as Record<ContentClass, number>;
 
   let unpriced = false;
   let turns = 0;
   let overflowTokens = 0;
-  let modelledSessions = 0;
   const splits = new Map<SessionAnalysis, ClassSplit>();
+  const toolBreakdowns = new Map<SessionAnalysis, ToolSessionBreakdown>();
 
   for (const session of sessions) {
     turns += session.turns.length;
@@ -344,24 +748,28 @@ export async function anatomyOf(
 
     const split = await splitOutput(session, counter);
     splits.set(session, split);
+    toolBreakdowns.set(session, toolBreakdown(session, split, calibration));
     overflowTokens += split.overflowTokens;
-
-    let modelled = true;
     for (const contentClass of CLASSES) {
-      const perTurn = split[contentClass];
-      classTokens[contentClass] += perTurn.reduce((a, b) => a + b, 0);
-      const cost = loadedCostOf(session.turns, perTurn);
-      if (!cost) {
-        modelled = false;
-        continue;
-      }
-      classOutputUSD[contentClass] += cost.outputUSD;
-      classLoadedUSD[contentClass] += cost.totalUSD;
+      classTokens[contentClass] += split[contentClass].reduce((a, b) => a + b, 0);
     }
-    if (modelled) modelledSessions++;
   }
 
-  const tools = toolHistogram(sessions);
+  const attributed = attribute(sessions, splits, toolBreakdowns);
+  const originUSD = Object.fromEntries(
+    ORIGINS.map((origin) => [
+      origin,
+      attributed.origins[origin].writeUSD + attributed.origins[origin].readUSD,
+    ]),
+  ) as Record<Origin, number>;
+
+  // A class costs the output lane once, then the write and every re-read of the echo. Both legs
+  // are measured; neither is projected forward to the end of the session.
+  const classLoadedUSD = Object.fromEntries(
+    CLASSES.map((c) => [c, attributed.classOutputUSD[c] + originUSD[c]]),
+  ) as Record<ContentClass, number>;
+
+  const tools = toolHistogram(sessions, attributed.toolCosts);
   return {
     label,
     sessions: sessions.length,
@@ -369,14 +777,21 @@ export async function anatomyOf(
     laneTokens: lanesTokens,
     laneUSD: lanesUSD,
     totalUSD: LANES.reduce((sum, lane) => sum + lanesUSD[lane], 0),
-    unpriced,
+    unpriced: unpriced || attributed.unpriced,
     classTokens,
-    classOutputUSD,
+    classOutputUSD: attributed.classOutputUSD,
     classLoadedUSD,
     overflowTokens,
-    modelledSessions,
+    origins: attributed.origins,
+    originUSD,
+    identityRatio: attributed.identityRatio,
+    compactedTokens: attributed.compactedTokens,
     tools,
     toolCallTotal: tools.reduce((sum, tool) => sum + tool.calls, 0),
+    toolResultTotal: tools.reduce((sum, tool) => sum + tool.results, 0),
+    toolCallBillUSD: tools.reduce((sum, tool) => sum + tool.callTotalUSD, 0),
+    toolResultBillUSD: tools.reduce((sum, tool) => sum + tool.resultTotalUSD, 0),
+    toolBillUSD: tools.reduce((sum, tool) => sum + tool.totalUSD, 0),
     persistence: fitPersistence(sessions, splits, calibration),
   };
 }

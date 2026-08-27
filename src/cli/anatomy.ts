@@ -4,6 +4,8 @@ import {
   CLASS_LABEL,
   LANES,
   LANE_LABEL,
+  ORIGINS,
+  ORIGIN_LABEL,
   type Anatomy,
   type ContentClass,
   type Lane,
@@ -20,30 +22,36 @@ const SPEC = { value: ['root'], boolean: ['exact', 'tools-only'] } as const;
 const USAGE = `jayn-caveman anatomy — what the bill is made of, by billing lane and by content class
 
 ${ROOT_HELP}
-  --tools-only        print only the tool-call histogram
+  --tools-only        print only the separate per-tool call and result bills
   --exact             count tokens with Anthropic's count_tokens API instead of the
                       offline BPE counter. Needs ANTHROPIC_API_KEY.
 
-Three questions, three tables.
+Six sections.
 
 LANES is what Anthropic charges for and comes straight out of the recorded usage, so it is
 exact. Cache reads dominate every corpus measured here, which is the single most important
 fact about an agent bill: you are not mostly paying to generate tokens, you are paying to
-re-read the ones you already generated.
+re-read them.
 
-CLASSES is what those tokens were. Prose and tool-call JSON are counted from the transcript;
-reasoning is the residual of billed output, because Claude Code stores a summary of the chain
-of thought and the raw chain is what gets billed. Each class is priced twice: at the output
-rate alone, and fully loaded — output, then the cache write on the next turn, then a cache
-read on every turn after that. The gap between the two columns is the compounding.
+CLASSES is what the OUTPUT was — only the tokens the model wrote. Prose and tool-call JSON are
+counted from the transcript; reasoning is the residual of billed output, because Claude Code
+stores a summary of the chain of thought and the raw chain is what gets billed. Note that
+"tool calls" here is the JSON the model EMITS to call a tool, never the result it reads back.
 
-TOOLS is every tool_use block by name.
+ORIGINS covers the whole bill, including the input side the classes leave out. Writes are
+attributed by differencing cache_creation against the previous turn's output; reads by
+carrying the composition of the prefix and splitting each turn's observed cache_read across
+it. Nothing is projected forward to the end of the session, so the amplification is the one
+that was actually charged. The audit line reports the carried prefix over the billed
+cache_read — if that is not near 1.000, the table is wrong and should not be quoted.
 
-The fully loaded column is a model, and it rests on output staying in the conversation and
-being re-read. That assumption is measured, not asserted: the persistence fit at the bottom
-regresses prefix growth on each class, with incoming tool results as the control.`;
+TOOL CALLS attributes the model's cost to generate each call plus the observed cache writes and
+reads of that call's JSON. TOOL RESULTS separately attributes cache writes and reads to matched
+tool_result blocks. Stored result sizes remain an upper bound because Claude Code may truncate
+them before sending; the dollar columns are scaled to recorded usage.`;
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
+const preciseUSD = (n: number) => (n > 0 && n < 0.01 ? `$${n.toFixed(4)}` : usd(n));
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 function tokens(n: number): string {
@@ -119,7 +127,8 @@ function classTable(report: Anatomy): string[] {
     lines.push('');
     lines.push(
       `  a token of output costs ${(loaded / raw).toFixed(2)}x its output-rate price once the ` +
-        `cache write and\n  every subsequent re-read are charged to it.`,
+        `cache write and\n  the re-reads it was actually charged are added. Measured against ` +
+        `observed cache_read,\n  not projected to the end of the session.`,
     );
   }
   if (report.overflowTokens > 0 && totalOutput > 0) {
@@ -129,17 +138,55 @@ function classTable(report: Anatomy): string[] {
         `reasoning residual was floored at zero on those turns.`,
     );
   }
-  if (report.modelledSessions < report.sessions) {
+  return lines;
+}
+
+function originTable(report: Anatomy): string[] {
+  const lines = [
+    `  ${'origin'.padEnd(28)}${'written'.padStart(9)}${'read'.padStart(9)}${'amp'.padStart(7)}` +
+      `${'write $'.padStart(11)}${'read $'.padStart(11)}${'total $'.padStart(11)}${'% bill'.padStart(9)}`,
+    `  ${'-'.repeat(95)}`,
+  ];
+  const order = [...ORIGINS].sort((a, b) => report.originUSD[b] - report.originUSD[a]);
+  for (const origin of order) {
+    const totals = report.origins[origin];
+    const amp = totals.written === 0 ? 0 : totals.read / totals.written;
     lines.push(
-      `! ${report.sessions - report.modelledSessions} of ${report.sessions} sessions could not be ` +
-        `replayed (unpriced model); their output is\n  counted in tokens but not in the dollar columns.`,
+      `  ${ORIGIN_LABEL[origin].padEnd(28)}${tokens(totals.written).padStart(9)}${tokens(totals.read).padStart(9)}` +
+        `${(amp === 0 ? '—' : `${amp.toFixed(1)}x`).padStart(7)}` +
+        `${usd(totals.writeUSD).padStart(11)}${usd(totals.readUSD).padStart(11)}` +
+        `${usd(report.originUSD[origin]).padStart(11)}` +
+        `${(report.totalUSD === 0 ? '—' : pct(report.originUSD[origin] / report.totalUSD)).padStart(9)}`,
     );
   }
+
+  const written = CLASSES.reduce((sum, c) => sum + report.originUSD[c], 0);
+  const outputLane = report.laneUSD.output;
+  const read = report.originUSD.fedIn + report.originUSD.preamble;
+  lines.push(`  ${'-'.repeat(95)}`);
+  lines.push(
+    `  ${'what the model WROTE'.padEnd(28)}${''.padStart(48)}${usd(written + outputLane).padStart(11)}` +
+      `${(report.totalUSD === 0 ? '—' : pct((written + outputLane) / report.totalUSD)).padStart(9)}`,
+  );
+  lines.push(
+    `  ${'what the model READ'.padEnd(28)}${''.padStart(48)}${usd(read).padStart(11)}` +
+      `${(report.totalUSD === 0 ? '—' : pct(read / report.totalUSD)).padStart(9)}`,
+  );
+  lines.push('');
+  lines.push(
+    `  audit: the carried prefix is ${report.identityRatio.toFixed(3)}x the billed cache_read` +
+      ` (1.000 is exact).\n  ${tokens(report.compactedTokens)} prefix tokens were dropped along the way — compaction and context editing.`,
+  );
+  lines.push(
+    `  "fed in" is everything that is not the preamble or the previous turn's output: tool\n` +
+      `  results and your prompts, but also injected reminders and re-writes after a TTL expiry.\n` +
+      `  It is an upper bound on tool results, not a measurement of them.`,
+  );
   return lines;
 }
 
 const TOOL_ROWS = 40;
-const NAME_WIDTH = 46;
+const NAME_WIDTH = 12;
 
 /**
  * MCP tool names are `mcp__<server>__<tool>`, and the server half is often a bare UUID. Trimming
@@ -152,33 +199,107 @@ function displayName(name: string): string {
   return `…${name.slice(name.length - NAME_WIDTH + 1)}`;
 }
 
-function toolTable(report: Anatomy): string[] {
-  if (report.tools.length === 0) return ['  (no tool calls in this corpus)'];
-  const width = NAME_WIDTH + 40;
-  const lines = [
-    `  ${'tool'.padEnd(NAME_WIDTH)}${'calls'.padStart(9)}${'% of calls'.padStart(12)}` +
-      `${'turns'.padStart(9)}${'sessions'.padStart(10)}`,
-    `  ${'-'.repeat(width)}`,
-  ];
-  for (const tool of report.tools.slice(0, TOOL_ROWS)) {
+function toolCallTable(report: Anatomy): string[] {
+  const tools = report.tools
+    .filter((tool) => tool.calls > 0 || tool.callTotalUSD > 0)
+    .sort((a, b) => b.callTotalUSD - a.callTotalUSD || b.calls - a.calls);
+  if (tools.length === 0) return ['  (no tool calls in this corpus)'];
+  const total = (rows: readonly Anatomy['tools'][number][]) =>
+    rows.reduce((sum, tool) => sum + tool.callTotalUSD, 0);
+  const header =
+    `  ${'tool'.padEnd(NAME_WIDTH)}${'calls'.padStart(7)}${'% calls'.padStart(9)}` +
+    `${'out tok'.padStart(10)}${'p50/p95'.padStart(12)}${'gen $'.padStart(10)}` +
+    `${'write $'.padStart(10)}${'read $'.padStart(10)}${'total $'.padStart(11)}${'% bill'.padStart(9)}`;
+  const lines = [header, `  ${'-'.repeat(header.length - 2)}`];
+  for (const tool of tools.slice(0, TOOL_ROWS)) {
+    const sizes = `${tokens(Math.round(tool.callP50Tokens))}/${tokens(Math.round(tool.callP95Tokens))}`;
     lines.push(
-      `  ${displayName(tool.name).padEnd(NAME_WIDTH)}${String(tool.calls).padStart(9)}` +
-        `${pct(tool.calls / report.toolCallTotal).padStart(12)}` +
-        `${String(tool.turns).padStart(9)}${String(tool.sessions).padStart(10)}`,
+      `  ${displayName(tool.name).padEnd(NAME_WIDTH)}${String(tool.calls).padStart(7)}` +
+        `${pct(tool.calls / report.toolCallTotal).padStart(9)}` +
+        `${tokens(Math.round(tool.callTokens)).padStart(10)}${sizes.padStart(12)}` +
+        `${preciseUSD(tool.callOutputUSD).padStart(10)}` +
+        `${preciseUSD(tool.callWriteUSD).padStart(10)}` +
+        `${preciseUSD(tool.callReadUSD).padStart(10)}` +
+        `${preciseUSD(tool.callTotalUSD).padStart(11)}` +
+        `${pct(report.toolCallBillUSD === 0 ? 0 : tool.callTotalUSD / report.toolCallBillUSD).padStart(9)}`,
     );
   }
-  if (report.tools.length > TOOL_ROWS) {
-    const rest = report.tools.slice(TOOL_ROWS);
+  if (tools.length > TOOL_ROWS) {
+    const rest = tools.slice(TOOL_ROWS);
     const calls = rest.reduce((sum, tool) => sum + tool.calls, 0);
+    const subtotal = total(rest);
     lines.push(
-      `  ${`(${rest.length} more tools)`.padEnd(NAME_WIDTH)}${String(calls).padStart(9)}` +
-        `${pct(calls / report.toolCallTotal).padStart(12)}`,
+      `  ${`(${rest.length} more)`.padEnd(NAME_WIDTH)}${String(calls).padStart(7)}` +
+        `${pct(calls / report.toolCallTotal).padStart(9)}` +
+        `${tokens(Math.round(rest.reduce((sum, tool) => sum + tool.callTokens, 0))).padStart(10)}` +
+        `${'—'.padStart(12)}${''.padStart(30)}${preciseUSD(subtotal).padStart(11)}` +
+        `${pct(report.toolCallBillUSD === 0 ? 0 : subtotal / report.toolCallBillUSD).padStart(9)}`,
     );
   }
-  lines.push(`  ${'-'.repeat(width)}`);
+  lines.push(`  ${'-'.repeat(header.length - 2)}`);
   lines.push(
-    `  ${`${report.tools.length} distinct tools`.padEnd(NAME_WIDTH)}${String(report.toolCallTotal).padStart(9)}`,
+    `  ${`${tools.length} tools`.padEnd(NAME_WIDTH)}${String(report.toolCallTotal).padStart(7)}` +
+      `${pct(1).padStart(9)}` +
+      `${tokens(Math.round(tools.reduce((sum, tool) => sum + tool.callTokens, 0))).padStart(10)}` +
+      `${'—'.padStart(12)}${''.padStart(30)}${preciseUSD(report.toolCallBillUSD).padStart(11)}` +
+      `${pct(1).padStart(9)}`,
   );
+  lines.push(
+    `  total $ = generation + attributed cache writes/reads of tool-call JSON; ` +
+      `${pct(report.totalUSD === 0 ? 0 : report.toolCallBillUSD / report.totalUSD)} of the whole bill.`,
+  );
+  return lines;
+}
+
+function toolResultTable(report: Anatomy): string[] {
+  const tools = report.tools
+    .filter((tool) => tool.results > 0 || tool.resultTotalUSD > 0)
+    .sort((a, b) => b.resultTotalUSD - a.resultTotalUSD || b.results - a.results);
+  if (tools.length === 0) return ['  (no matched tool results in this corpus)'];
+  const total = (rows: readonly Anatomy['tools'][number][]) =>
+    rows.reduce((sum, tool) => sum + tool.resultTotalUSD, 0);
+  const header =
+    `  ${'tool'.padEnd(NAME_WIDTH)}${'results'.padStart(8)}${'% results'.padStart(10)}` +
+    `${'in tok'.padStart(10)}${'p50/p95'.padStart(12)}${'write $'.padStart(10)}` +
+    `${'read $'.padStart(10)}${'total $'.padStart(11)}${'% bill'.padStart(9)}`;
+  const lines = [header, `  ${'-'.repeat(header.length - 2)}`];
+  for (const tool of tools.slice(0, TOOL_ROWS)) {
+    const sizes = `${tokens(Math.round(tool.resultP50Tokens))}/${tokens(Math.round(tool.resultP95Tokens))}`;
+    lines.push(
+      `  ${displayName(tool.name).padEnd(NAME_WIDTH)}${String(tool.results).padStart(8)}` +
+        `${pct(tool.results / report.toolResultTotal).padStart(10)}` +
+        `${tokens(Math.round(tool.resultTokens)).padStart(10)}${sizes.padStart(12)}` +
+        `${preciseUSD(tool.resultWriteUSD).padStart(10)}` +
+        `${preciseUSD(tool.resultReadUSD).padStart(10)}` +
+        `${preciseUSD(tool.resultTotalUSD).padStart(11)}` +
+        `${pct(report.toolResultBillUSD === 0 ? 0 : tool.resultTotalUSD / report.toolResultBillUSD).padStart(9)}`,
+    );
+  }
+  if (tools.length > TOOL_ROWS) {
+    const rest = tools.slice(TOOL_ROWS);
+    const results = rest.reduce((sum, tool) => sum + tool.results, 0);
+    const subtotal = total(rest);
+    lines.push(
+      `  ${`(${rest.length} more)`.padEnd(NAME_WIDTH)}${String(results).padStart(8)}` +
+        `${pct(results / report.toolResultTotal).padStart(10)}` +
+        `${tokens(Math.round(rest.reduce((sum, tool) => sum + tool.resultTokens, 0))).padStart(10)}` +
+        `${'—'.padStart(12)}${''.padStart(20)}${preciseUSD(subtotal).padStart(11)}` +
+        `${pct(report.toolResultBillUSD === 0 ? 0 : subtotal / report.toolResultBillUSD).padStart(9)}`,
+    );
+  }
+  lines.push(`  ${'-'.repeat(header.length - 2)}`);
+  lines.push(
+    `  ${`${tools.length} tools`.padEnd(NAME_WIDTH)}${String(report.toolResultTotal).padStart(8)}` +
+      `${pct(1).padStart(10)}` +
+      `${tokens(Math.round(tools.reduce((sum, tool) => sum + tool.resultTokens, 0))).padStart(10)}` +
+      `${'—'.padStart(12)}${''.padStart(20)}${preciseUSD(report.toolResultBillUSD).padStart(11)}` +
+      `${pct(1).padStart(9)}`,
+  );
+  lines.push(
+    `  total $ = attributed cache writes/reads of matched results; ` +
+      `${pct(report.totalUSD === 0 ? 0 : report.toolResultBillUSD / report.totalUSD)} of the whole bill.`,
+  );
+  lines.push(`  result token sizes are transcript upper bounds; billed cache totals anchor the cost.`);
   return lines;
 }
 
@@ -219,9 +340,15 @@ function render(report: Anatomy, toolsOnly: boolean): void {
     console.log('  WHAT THE OUTPUT WAS (prose and tools counted, reasoning by residual)');
     for (const line of classTable(report)) console.log(line);
     console.log('');
+    console.log('  WHERE THE TOKENS CAME FROM (writes differenced, reads split over the real prefix)');
+    for (const line of originTable(report)) console.log(line);
+    console.log('');
   }
-  console.log('  TOOL CALLS');
-  for (const line of toolTable(report)) console.log(line);
+  console.log('  TOOL CALLS (sorted by call-side cost)');
+  for (const line of toolCallTable(report)) console.log(line);
+  console.log('');
+  console.log('  TOOL RESULTS (sorted by result-side cost)');
+  for (const line of toolResultTable(report)) console.log(line);
   if (!toolsOnly) {
     console.log('');
     console.log('  DOES OUTPUT STAY IN THE PREFIX? (regression of prefix growth on content class)');
@@ -289,7 +416,7 @@ async function run(args: Args): Promise<void> {
 
 export const anatomyCommand: Command = {
   name: 'anatomy',
-  summary: 'what the bill is made of: billing lanes, content classes, and the tool histogram',
+  summary: 'what the bill is made of: billing lanes, content classes, and per-tool exchange cost',
   usage: USAGE,
   spec: SPEC,
   run,

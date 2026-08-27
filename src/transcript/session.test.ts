@@ -111,10 +111,45 @@ const hook = (text: string, hookEvent = 'SessionStart') => ({
   attachment: { type: 'hook', hookName: 'caveman', hookEvent, content: text },
 });
 
-const toolResult = (text: string) => ({
+const toolResult = (text: string, toolUseId?: string) => ({
   type: 'user',
-  message: { role: 'user', content: [{ type: 'tool_result', content: text }] },
+  message: {
+    role: 'user',
+    content: [
+      { type: 'tool_result', ...(toolUseId === undefined ? {} : { tool_use_id: toolUseId }), content: text },
+    ],
+  },
   toolUseResult: { stdout: text },
+});
+
+test('block detail pairs tool calls and results without retaining result text', async () => {
+  const file = writeTranscript([
+    {
+      type: 'assistant',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: {
+        id: 'm1',
+        model: 'claude-opus-4-6',
+        usage: USAGE,
+        content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'src/a.ts' } }],
+      },
+    },
+    toolResult('the file contents', 'tool-1'),
+    assistant('m2', 'done', '2026-01-01T00:00:01Z'),
+  ]);
+
+  const session = await analyzeSession(file, { blockDetail: true });
+  const call = session.turns[0]!.toolCallDetails[0]!;
+  assert.equal(call.name, 'Read');
+  assert.equal(session.turns[0]!.toolCallText.slice(call.start, call.end), 'Read{"file_path":"src/a.ts"}');
+  assert.deepEqual(session.turns[1]!.incomingToolResults, [
+    {
+      toolUseId: 'tool-1',
+      name: 'Read',
+      legacyTokens: session.turns[1]!.incomingToolResults[0]!.legacyTokens,
+    },
+  ]);
+  assert.ok(session.turns[1]!.incomingToolResults[0]!.legacyTokens > 0);
 });
 
 const assistant = (id: string, text: string, ts: string) => ({

@@ -193,17 +193,23 @@ you can reproduce exactly, without any transcripts of your own.
 
 ```bash
 npm run cli -- anatomy --root $C/cofounder,$C/gauthier    # one block per corpus, plus a pooled one
-npm run cli -- anatomy --root $C/gustave --tools-only     # just the tool histogram
+npm run cli -- anatomy --root $C/gustave --tools-only     # just the per-tool exchange bill
 ```
 
-Not a caveman number — a property of the corpus. Three tables per corpus.
+Not a caveman number — a property of the corpus. Four tables per corpus.
 
 **Lanes** is exact, straight out of the recorded `usage`: fresh input, cache read, cache write at
-each TTL, output. **Classes** splits billed output into reasoning, prose and tool-call JSON, and
-prices each of them twice — at the output rate alone, and fully loaded with the cache write and
-every subsequent re-read charged back to it. **Tools** is every `tool_use` block by name.
+each TTL, output. **Classes** splits billed _output_ into reasoning, prose and tool-call JSON —
+only what the model wrote. **Origins** covers the whole bill, input side included. **Tools** joins
+each `tool_use` to its `tool_result` by ID and ranks tools by their combined call-output and
+attributed cache-write/read cost.
 
-Two things to know before quoting it.
+Three things to know before quoting it.
+
+**Tool calls are not tool results.** The `toolCalls` class is the JSON the model _emits_ to invoke
+a tool, which is output. What comes back is a `tool_result` and lands on the input side, inside
+`fedIn` in the origins table. Confusing the two inverts the conclusion: the emitted JSON is about
+half of output but output is only ~11% of the bill.
 
 Reasoning tokens are a **residual**, not a count. Claude Code stores a summary of the chain of
 thought while the raw chain is what gets billed, so turns carrying a thinking block bill ~2.6x
@@ -211,9 +217,29 @@ their transcribed text against ~1.45x — the calibration factor — for turns w
 the summary would undercount reasoning about fourfold. Prose and tool JSON are counted; reasoning
 is what is left of billed output, and only on turns that actually carried a thinking block.
 
-The fully loaded column assumes output stays in the conversation and is re-read on every later
-turn. The command **measures that instead of asserting it**: the persistence fit at the bottom
-regresses prefix growth on each content class, using incoming tool results as a control whose
+**Nothing in the loaded column is modelled.** An earlier version priced each class with
+`replayDelta`, charging it a cache read on every remaining turn of the session; that assumes
+tokens survive to the end, and real conversations compact and lose their prefix. It printed 4.39x
+the output rate against a measured 2.43x. The current code differences `cache_creation` against
+the previous turn's billed output for the write side, and splits each turn's _observed_
+`cache_read` across a carried prefix composition for the read side. The audit line prints the
+carried prefix over the billed `cache_read`; if that is not ~1.000, do not quote the table.
+
+`fedIn` is an **upper bound** on tool results, not a measurement of them. It is everything that is
+neither the preamble nor the previous turn's output, so it also absorbs injected reminders,
+subagent prefixes (`session.ts` does not filter `isSidechain`) and re-writes after a cache TTL
+expiry — each measured at roughly 14% of writes.
+
+The Tools table narrows that upper bound using matched result blocks. `call out` is the billed
+tool-call output split by each call's token weight; `result in` and the exchange p50/p95 come from
+the stored transcript and may therefore overstate what Claude Code actually sent. `written` and
+`read`, and consequently `total $`, are scaled against the observed cache lanes rather than the
+stored result size. `% tools` uses the combined tool-call/result subtotal as its denominator, and
+the table is sorted by that cost rather than by call count. Fresh-input attribution is not included
+in this per-tool subtotal.
+
+The persistence fit at the bottom is a separate check on whether reasoning is carried at all: it
+regresses prefix growth on each content class using incoming tool results as a control whose
 coefficient is known to be ~1. Across the ten corpora the control lands at 0.86–1.15 and reasoning
 at 0.90–1.02 on nine of them, so reasoning does compound. Read the per-corpus fits, not the pooled
 one — pooling mixes corpora with different per-turn fixed overheads and the pooled fit is looser.
