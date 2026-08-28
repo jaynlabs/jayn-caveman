@@ -16,7 +16,7 @@
     "cli": "tsx src/index.ts",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
+    "lint": "eslint src tools",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
