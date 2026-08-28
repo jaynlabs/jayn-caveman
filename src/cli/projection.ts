@@ -2,6 +2,7 @@ import { billOf, englishOnly, withoutCaveman } from '../corpus/profile.js';
 import { analyze, type AnalysisReport } from '../effects/caveman/analyze.js';
 import { CAVEMAN } from '../effects/caveman/effect.js';
 import { calibrateLocally, groupByLabel, loadGrouped } from '../transcript/load.js';
+import type { Placement } from '../transcript/replay.js';
 import type { SessionAnalysis } from '../transcript/session.js';
 import { ApiCounter, BpeCounter, resolveApiKey, type TokenCounter } from '../transcript/tokens.js';
 import type { Args } from './args.js';
@@ -76,9 +77,31 @@ export async function project(
   sessions: SessionAnalysis[],
   counter: TokenCounter,
   model: string | undefined,
+  placement?: Placement,
 ): Promise<Projection> {
   return {
-    alwaysFires: await analyze(sessions, counter, CAVEMAN, { model, alwaysFires: true }),
-    measured: await analyze(sessions, counter, CAVEMAN, { model }),
+    alwaysFires: await analyze(sessions, counter, CAVEMAN, { model, alwaysFires: true, placement }),
+    measured: await analyze(sessions, counter, CAVEMAN, { model, placement }),
   };
 }
+
+const PLACEMENTS = new Set<Placement>(['proportional', 'read', 'rewrite']);
+
+/**
+ * Billing says what fraction of a surviving prefix was written a second time, never which tokens
+ * those were. `proportional` spreads the counterfactual delta through the prefix like everything
+ * else; `read` and `rewrite` are the corners the usage totals still allow.
+ */
+export function placementFrom(args: Args): Placement | undefined {
+  const raw = args.value('placement');
+  if (raw === undefined) return undefined;
+  if (!PLACEMENTS.has(raw as Placement)) {
+    throw new Error(`--placement must be one of ${[...PLACEMENTS].join(', ')}, not "${raw}".`);
+  }
+  return raw as Placement;
+}
+
+export const PLACEMENT_HELP =
+  '  --placement <where> where changed tokens sit in a partially re-written prefix:\n' +
+  '                      proportional (default), read, or rewrite. The two corners\n' +
+  '                      bound what billing cannot identify; see docs/methodology.md';

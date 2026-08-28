@@ -1,9 +1,12 @@
 import type { SessionResult } from '../transcript/replay.js';
 import type { Args, Command } from './args.js';
-import { cohorts, counterFor, project } from './projection.js';
+import { cohorts, counterFor, placementFrom, project, PLACEMENT_HELP } from './projection.js';
 import { ROOT_HELP, targetsFrom } from './roots.js';
 
-const SPEC = { value: ['root', 'model', 'buckets'], boolean: ['exact', 'mixed-languages'] } as const;
+const SPEC = {
+  value: ['root', 'model', 'buckets', 'placement'],
+  boolean: ['exact', 'mixed-languages'],
+} as const;
 
 const DEFAULT_BUCKETS = [200, 400, 600, 800, 1000, 1500, 2500];
 
@@ -13,6 +16,7 @@ ${ROOT_HELP}
   --buckets <a,b,c>   bucket edges in prose per prompt (default: ${DEFAULT_BUCKETS.join(',')})
   --model <family>    fit p_fire on one model family only, e.g. claude-opus-5
   --mixed-languages   keep sessions that are not entirely English
+${PLACEMENT_HELP}
   --exact             count tokens with Anthropic's count_tokens API instead of the
                       offline BPE counter. Needs ANTHROPIC_API_KEY.
 
@@ -100,7 +104,7 @@ async function run(args: Args): Promise<void> {
   const counting = counterFor(args, sessions);
   let buckets: Bucket[];
   try {
-    const { measured } = await project(sessions, counting.counter, args.value('model'));
+    const { measured } = await project(sessions, counting.counter, args.value('model'), placementFrom(args));
     buckets = tally(measured.results, edges);
   } finally {
     counting.flush();

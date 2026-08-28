@@ -1,4 +1,5 @@
 import { price } from '../billing/pricing.js';
+import { requestSize, rewrittenTokens, survivingShare } from './transition.js';
 import type { SessionAnalysis, Turn } from './session.js';
 import type { InjectionProfile } from './injection.js';
 
@@ -41,8 +42,30 @@ function writeMultiplier(turn: Turn, rates: Rates): number {
   return (rates.write5m * turn.cacheWrite5m + rates.write1h * turn.cacheWrite1h) / total;
 }
 
-function isColdStart(turn: Turn): boolean {
-  return turn.cacheRead === 0 && turn.cacheWrite5m + turn.cacheWrite1h > 0;
+/**
+ * Where in the prefix the counterfactual tokens sit.
+ *
+ * Billing says what fraction of the surviving prefix was written a second time. It does not say
+ * *which* tokens those were, so it cannot say whether a token this replay invented would have been
+ * among them. `proportional` spreads the delta through the prefix like everything else and is the
+ * reported estimate; the other two are the corners of what the data allows, and exist so the
+ * published figure can carry a range. See docs/replay-correction.md.
+ */
+export type Placement = 'proportional' | 'read' | 'rewrite';
+
+/**
+ * Of `delta` counterfactual tokens sitting in a prefix where `rewritten` of `cacheRead + rewritten`
+ * came back as cache creation, the fraction to bill at the write multiplier. Sign-symmetric: a
+ * removed token is credited wherever an added one would have been charged.
+ */
+function placedShare(placement: Placement, delta: number, cacheRead: number, rewritten: number): number {
+  const present = cacheRead + rewritten;
+  if (present <= 0 || rewritten <= 0) return 0;
+  if (placement === 'proportional') return rewritten / present;
+
+  const span = Math.min(Math.abs(delta), present);
+  if (span <= 0) return 0;
+  return placement === 'rewrite' ? Math.min(span, rewritten) / span : Math.max(0, span - cacheRead) / span;
 }
 
 export interface CostBreakdown {
@@ -66,17 +89,31 @@ export interface DeltaBreakdown {
   writeUSD: number;
   readUSD: number;
   totalUSD: number;
+
+  /** Turns where a negative delta was truncated to keep the counterfactual prefix non-negative. */
+  clampedTurns: number;
 }
 
+/**
+ * Price the difference between the observed conversation and a counterfactual one.
+ *
+ * The observed bill is never touched; this returns only the delta beside it. `f` scales the prose a
+ * turn emitted, `injectionDelta` adds or removes tokens that were fed in rather than written. Both
+ * accumulate into a running prefix, and the point of this function is what that prefix costs on
+ * every later turn: a cheap re-read while the cache holds, the write multiplier on whatever share
+ * of it the model had to write a second time.
+ */
 export function replayDelta(
   turns: Turn[],
   proseTokens: number[],
   f: (turn: Turn, index: number) => number,
   injectionDelta: (turn: Turn, index: number) => number,
+  placement: Placement = 'proportional',
 ): DeltaBreakdown | null {
   let outputUSD = 0;
   let writeUSD = 0;
   let readUSD = 0;
+  let clampedTurns = 0;
   let pendingWrite = 0;
   let inPrefix = 0;
 
@@ -84,11 +121,30 @@ export function replayDelta(
     const rates = ratesFor(turn.model, turn.timestamp);
     if (!rates) return null;
     const cw = writeMultiplier(turn, rates);
+    const prev = index === 0 ? null : turns[index - 1]!;
+
+    // whatever the conversation dropped on the way into this request, it dropped the delta too
+    if (prev) inPrefix *= survivingShare(prev, turn);
 
     pendingWrite += injectionDelta(turn, index);
 
+    // the counterfactual prefix is the observed one plus the delta, and cannot go below zero
+    const floor = -requestSize(turn);
+    if (inPrefix + pendingWrite < floor) {
+      pendingWrite = floor - inPrefix;
+      clampedTurns++;
+    }
+
+    // tokens joining the prefix are written once, at whatever mix of 5m and 1h this turn used
     writeUSD += pendingWrite * rates.input * cw;
-    readUSD += inPrefix * rates.input * (isColdStart(turn) ? cw : rates.read);
+
+    // tokens already in the prefix are read back — bar the share of it that was written again
+    if (prev) {
+      const share = placedShare(placement, inPrefix, turn.cacheRead, rewrittenTokens(prev, turn));
+      writeUSD += inPrefix * share * rates.input * cw;
+      readUSD += inPrefix * (1 - share) * rates.input * rates.read;
+    }
+
     inPrefix += pendingWrite;
     pendingWrite = 0;
 
@@ -97,7 +153,7 @@ export function replayDelta(
     pendingWrite += proseDelta;
   }
 
-  return { outputUSD, writeUSD, readUSD, totalUSD: outputUSD + writeUSD + readUSD };
+  return { outputUSD, writeUSD, readUSD, totalUSD: outputUSD + writeUSD + readUSD, clampedTurns };
 }
 
 export interface SessionResult {
@@ -131,6 +187,7 @@ export function replaySession(
   injectedTokensPerTurn: number[],
 
   redundantTokensPerTurn: number[] = [],
+  placement: Placement = 'proportional',
 ): SessionResult {
   const observed = observedCost(session.turns);
   const base: SessionResult = {
@@ -155,6 +212,7 @@ export function replaySession(
       proseTokens,
       (turn, index) => 1 / effectiveRatio(turn, index),
       (_turn, index) => -(injectedTokensPerTurn[index] ?? 0),
+      placement,
     );
     if (!delta) return base;
 
@@ -163,6 +221,7 @@ export function replaySession(
       proseTokens,
       () => 1,
       (_turn, index) => -(redundantTokensPerTurn[index] ?? 0),
+      placement,
     );
     return {
       ...base,
@@ -173,10 +232,16 @@ export function replaySession(
     };
   }
 
-  const delta = replayDelta(session.turns, proseTokens, effectiveRatio, (turn, index) => {
-    const oneTime = index === 0 ? profile.oneTimeTokens : 0;
-    return oneTime + turn.userPromptsBefore * profile.perPromptTokens;
-  });
+  const delta = replayDelta(
+    session.turns,
+    proseTokens,
+    effectiveRatio,
+    (turn, index) => {
+      const oneTime = index === 0 ? profile.oneTimeTokens : 0;
+      return oneTime + turn.userPromptsBefore * profile.perPromptTokens;
+    },
+    placement,
+  );
   if (!delta) return base;
   return { ...base, optimizedUSD: observed.costUSD + delta.totalUSD, modelled: true, delta };
 }

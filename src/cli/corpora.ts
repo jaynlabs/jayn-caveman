@@ -1,14 +1,15 @@
 import type { Args, Command } from './args.js';
-import { cohorts, counterFor, project, type Cohort } from './projection.js';
+import { cohorts, counterFor, placementFrom, project, PLACEMENT_HELP, type Cohort } from './projection.js';
 import { ROOT_HELP, targetsFrom } from './roots.js';
 
-const SPEC = { value: ['root', 'model'], boolean: ['exact', 'mixed-languages'] } as const;
+const SPEC = { value: ['root', 'model', 'placement'], boolean: ['exact', 'mixed-languages'] } as const;
 
 const USAGE = `jayn-caveman corpora — what installing caveman would have done to people who never ran it
 
 ${ROOT_HELP}
   --model <family>    fit p_fire on one model family only, e.g. claude-opus-5
   --mixed-languages   keep sessions that are not entirely English
+${PLACEMENT_HELP}
   --exact             count tokens with Anthropic's count_tokens API instead of the
                       offline BPE counter. Needs ANTHROPIC_API_KEY.
 
@@ -40,7 +41,12 @@ function row(label: string, billUSD: number, always: [number, number], measured:
 async function renderCohort(cohort: Cohort, args: Args): Promise<string[]> {
   const counting = counterFor(args, cohort.sessions);
   try {
-    const { alwaysFires, measured } = await project(cohort.sessions, counting.counter, args.value('model'));
+    const { alwaysFires, measured } = await project(
+      cohort.sessions,
+      counting.counter,
+      args.value('model'),
+      placementFrom(args),
+    );
     return [
       row(
         cohort.label,

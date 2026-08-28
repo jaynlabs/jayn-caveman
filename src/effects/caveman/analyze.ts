@@ -5,7 +5,13 @@ import {
   redundantTokensOf,
   type InjectionProfile,
 } from '../../transcript/injection.js';
-import { replaySession, totalsOf, type SessionResult, type Totals } from '../../transcript/replay.js';
+import {
+  replaySession,
+  totalsOf,
+  type Placement,
+  type SessionResult,
+  type Totals,
+} from '../../transcript/replay.js';
 import { lastOfRunFlags, type SessionAnalysis, type Turn } from '../../transcript/session.js';
 import { verifyCounter, type CounterCheck, type TokenCounter } from '../../transcript/tokens.js';
 import type { ToolEffect } from '../types.js';
@@ -61,20 +67,29 @@ export interface AnalyzeOptions {
   model?: string;
 
   alwaysFires?: boolean;
+
+  /** Where a counterfactual token is assumed to sit in a partially re-written prefix. */
+  placement?: Placement;
+
+  /**
+   * Stand in for the measured injection profile. Only `tools/injection-term.ts` passes it, to price
+   * the same replay with the cost side switched off; the CLI never overrides what it measured.
+   */
+  profile?: InjectionProfile;
 }
 
 export async function analyze(
   sessions: SessionAnalysis[],
   counter: TokenCounter,
   effect: ToolEffect,
-  { ratios = CAVEMAN_RATIOS, model, alwaysFires = false }: AnalyzeOptions = {},
+  { ratios = CAVEMAN_RATIOS, model, alwaysFires = false, placement, profile: override }: AnalyzeOptions = {},
 ): Promise<AnalysisReport> {
   const counterCheck = await verifyCounter(counter, groundTruthSamples(sessions));
 
   const counted = new Map<string, { prose: number[]; injected: number[]; redundant: number[] }>();
   for (const session of sessions) counted.set(session.file, await countTurns(session, counter));
 
-  const profile = await measureInjectionProfile(sessions, counter);
+  const profile = override ?? (await measureInjectionProfile(sessions, counter));
   const pFire = await loadPFireModel(sessions, counter, { model });
 
   const pFireUnavailable = !isUsable(pFire.curve) && pFire.prior === null;
@@ -117,6 +132,7 @@ export async function analyze(
         profile,
         injected,
         redundant,
+        placement,
       );
     });
 

@@ -3,3 +3,5 @@ dist/
 package-lock.json
 curves/
 data/
+.token-checker/
+out/
