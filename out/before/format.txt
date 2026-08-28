@@ -1,7 +1,0 @@
-
-> jayn-caveman@1.0.0 format:check
-> prettier --check .
-
-Checking formatting...
-[warn] src/cli/anatomy.ts
-[warn] Code style issues found in the above file. Run Prettier with --write to fix.

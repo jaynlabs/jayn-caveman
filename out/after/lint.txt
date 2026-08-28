@@ -1,4 +1,0 @@
-
-> jayn-caveman@1.0.0 lint
-> eslint src tools
-

@@ -141,14 +141,15 @@ usually near one corner or the other, and only the aggregate is near the middle.
 
 ## 6. Results
 
-Baseline and corrected runs are in `out/before/` and `out/after/`, each with a `PROVENANCE.txt`
-recording the git revision, the node version and the exact roots. Both were run with
-`--model claude-opus-5`; the corrected figures below are the `proportional` placement.
+Every figure below was read off the commands in [REPRODUCING.md](../REPRODUCING.md), run at the
+roots named there with `--model claude-opus-5`. The corrected figures are the `proportional`
+placement; the baseline column is the same command against the previous implementation. The raw
+command output is not committed — regenerate it rather than trusting the numbers here.
 
 ### The tests
 
-The suite is 153 tests. Against the **old** replay 12 of them fail
-(`out/before/test-new-suite.txt`), including `regression: the observed 26.5k-read / 741k-write
+The suite is 153 tests. Against the **old** replay 12 of them fail — restore the previous
+`replayDelta` and run it — including `regression: the observed 26.5k-read / 741k-write
 shape` — a prefix already carrying a delta, crossing a turn shaped like the transition §1 opens
 with. The old code prices that turn identically to a clean cache hit; the new one charges the
 surcharge the write lane actually billed. Two more pin the anatomy side of the same identity — a
@@ -178,9 +179,9 @@ $48.96, and the output-only prose share (1.0 / 0.8 / 0.4 / 1.1 / 0.9%).
 
 ### Which part of the correction did what
 
-`tools/ablation.ts` prices the amplified ceiling with each half switched on alone. The `old`
-column reproduces the published figures exactly, which is what makes the rest readable
-(`out/after/ceiling-ablation.txt`):
+`npx tsx tools/ablation.ts <root>,<root>` prices the amplified ceiling with each half switched
+on alone. The `old` column reproduces the published figures exactly, which is what makes the rest
+readable:
 
 ```text
   corpus                 old     + rewrite  + compaction       + clamp     corrected

@@ -1,5 +1,0 @@
-
-> jayn-caveman@1.0.0 cli
-> tsx src/index.ts curves --check
-
-./curves/caveman-style.json: up to date
