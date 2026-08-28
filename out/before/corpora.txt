@@ -1,0 +1,23 @@
+
+> jayn-caveman@1.0.0 cli
+> tsx src/index.ts corpora --root $C/gauthier/projects,$C/corpus-5/projects,$C/corpus-6/projects,$C/jrigal/projects --model claude-opus-5
+
+  corpus                   bill    if it always fired  with p_fire wired in
+  -------------------------------------------------------------------------
+  gauthier             $4578.70     +$28.85    +0.63%      +$3.34    +0.07%
+                    461 sessions   p̄ 48.9%   ceiling 1.0% of the bill
+  corpus-5              $623.58     +$12.53    +2.01%      −$3.68    −0.59%
+                    22 sessions   p̄ 24.7%   ceiling 0.8% of the bill
+  corpus-6              $131.84      +$0.87    +0.66%      −$0.08    −0.06%
+                     9 sessions   p̄ 30.7%   ceiling 0.4% of the bill
+  jrigal                 $97.65      +$0.77    +0.78%      +$0.09    +0.09%
+                    12 sessions   p̄ 43.5%   ceiling 1.1% of the bill
+  -------------------------------------------------------------------------
+  all                  $5431.76     +$42.93    +0.79%      −$0.34    −0.01%
+                    504 sessions   p̄ 45.4%   ceiling 0.9% of the bill
+
+! 1269 session(s) ($48.96) excluded: not entirely English. A corpus that
+  loses most of its spend here has no English-only projection worth reading.
+
+! gauthier is 84% of the pooled bill, so the pooled row is
+  mostly that one person. Read the per-corpus rows, not the total.

@@ -1,0 +1,40 @@
+
+## cofounder — 32 sessions, 2754 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)          1     0.0%              41           0.0%
+  genuine prefix growth                2724    98.9%            3.9M          64.3%
+  partial TTL rewrite                    23     0.8%            2.0M          32.4%
+  compaction + rewrite together           6     0.2%            196k           3.2%
+
+  re-written prefix               2.1M tokens, 35.0% of all cache creation
+  fresh input (never cached)        6k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 73.4%  p50 82.7%  p75 86.8%  p95 91.2%
+
+## maxence-2026-08 — 76 sessions, 3977 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  genuine prefix growth                3899    98.0%            6.9M          68.4%
+  full cold start                         3     0.1%            656k           6.5%
+  partial TTL rewrite                    60     1.5%            1.8M          18.2%
+  compaction + rewrite together          15     0.4%            691k           6.9%
+
+  re-written prefix               3.0M tokens, 30.0% of all cache creation
+  fresh input (never cached)       78k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 0.4%  p50 27.8%  p75 72.8%  p95 88.8%
+
+## all corpora pooled — 108 sessions, 6731 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)          1     0.0%              41           0.0%
+  genuine prefix growth                6623    98.4%           10.8M          66.9%
+  full cold start                         3     0.0%            656k           4.1%
+  partial TTL rewrite                    83     1.2%            3.8M          23.5%
+  compaction + rewrite together          21     0.3%            887k           5.5%
+
+  re-written prefix               5.1M tokens, 31.9% of all cache creation
+  fresh input (never cached)       83k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 3.3%  p50 63.6%  p75 80.8%  p95 90.2%

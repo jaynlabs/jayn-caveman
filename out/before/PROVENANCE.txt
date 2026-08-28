@@ -1,0 +1,31 @@
+# baseline captured before the replayDelta correction
+#
+# Paths in the saved command headers are written as $C (see below); nothing else was edited.
+date:        2026-08-28T11:53:22Z
+git rev:     79e398d8f7af50da3b5ee51fa674d92c245e1be4
+git dirty:    M src/cli/anatomy.ts  M src/corpus/anatomy.ts ?? docs/anatomy-replay-refresh-plan.md ?? out/ ?? tools/ 
+node:        v26.7.0
+corpus root: $C = ~/src/jayn-headroom/.token-checker/corpora
+
+four corpora (blog A-D): gauthier, corpus-5, corpus-6, jrigal
+test exit=0
+typecheck exit=0
+lint exit=0
+format exit=1
+
+canonical roots (recovered 2026-08-28, every published figure reproduced exactly)
+--------------------------------------------------------------------------------
+vanilla four (blog corpus A-D), used by `corpora`, `breakeven`, tools/ceiling.ts:
+  gauthier=A  corpus-5=B  corpus-6=C  jrigal=D   -- <corpus>/projects
+  reproduces $5431.76 / 504 sessions / +$42.93 +0.79% / -$0.34 -0.01% / 1269 dropped
+
+caveman-live (blog "Where caveman actually ran" + sensitivity band), used by `analyze`:
+  cofounder + maxence-2026-08 -- at the CORPUS ROOT, not <corpus>/projects.
+  Those two are the only corpora carrying a captures/ dir of dated snapshots;
+  projects/ alone sees 51 of the 108 sessions. Everything else has projects/ only.
+  reproduces 108 sessions / 98 caveman / $755.53 / saved $4.84 0.6% / p_fire 50.6%
+  and the whole 1.7 / 0.9 / 0.6 / 0.4 sensitivity band.
+
+note: `analyze` takes a single --root string, so the union needs a brace glob, and
+npm/npx re-invoke through a shell that expands braces -- they must be escaped:
+  npx tsx src/index.ts analyze --root "$C/\{cofounder,maxence-2026-08\}" ...

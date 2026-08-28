@@ -1,0 +1,19 @@
+  corpus                   bill    if it always fired  with p_fire wired in
+  -------------------------------------------------------------------------
+  gauthier             $4578.70     +$30.36    +0.66%      +$2.11    +0.05%
+                    461 sessions   p̄ 48.9%   ceiling 1.0% of the bill
+  corpus-5              $623.58      +$4.13    +0.66%      −$3.59    −0.58%
+                    22 sessions   p̄ 24.7%   ceiling 0.8% of the bill
+  corpus-6              $131.84      +$1.00    +0.76%      −$0.11    −0.08%
+                     9 sessions   p̄ 30.7%   ceiling 0.4% of the bill
+  jrigal                 $97.65      +$0.79    +0.81%      +$0.01    +0.01%
+                    12 sessions   p̄ 43.5%   ceiling 1.1% of the bill
+  -------------------------------------------------------------------------
+  all                  $5431.76     +$36.25    +0.67%      −$1.57    −0.03%
+                    504 sessions   p̄ 45.4%   ceiling 0.9% of the bill
+
+! 1269 session(s) ($48.96) excluded: not entirely English. A corpus that
+  loses most of its spend here has no English-only projection worth reading.
+
+! gauthier is 84% of the pooled bill, so the pooled row is
+  mostly that one person. Read the per-corpus rows, not the total.

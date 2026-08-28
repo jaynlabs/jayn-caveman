@@ -29,13 +29,21 @@ npm run cli -- compliance --root ~/corpora/alice,~/corpora/bob
 
 | Command      | Regenerates                                                          |
 | ------------ | -------------------------------------------------------------------- |
-| `analyze`    | the headline (−0.01%), the sensitivity band, the prose-share ceiling |
+| `analyze`    | the headline (±0.03%), the sensitivity band, the prose-share ceiling |
 | `compliance` | the `p_fire` table, the arm balance, the leave-one-out spread        |
 | `corpora`    | the per-corpus money table                                           |
 | `breakeven`  | the English-prose-per-prompt table and the crossing                  |
 | `trial`      | `R`, the compression ratio — **this one spends real money**          |
 | `curves`     | refits `curves/` from `data/` — the CI gate on our own numbers       |
 | `anatomy`    | what the bill is made of: billing lanes, content classes, tools      |
+
+Two figures in the post price tools that do not exist, so they are scripts in `tools/` rather
+than CLI commands:
+
+| Script                    | Regenerates                                                  |
+| ------------------------- | ------------------------------------------------------------ |
+| `tools/ceiling.ts`        | the amplified prose ceiling — perfect compression, free tool |
+| `tools/injection-term.ts` | the same replay with caveman's cost side switched off        |
 
 ### `analyze` — the headline and the band
 
@@ -51,8 +59,22 @@ use it to read a headline, because the band is what says whether the headline is
 is priced — every turn is still replayed and billed. Vanilla terseness spans 28 points between
 model families, so a curve fitted across a mixture of them partly measures the mixture.
 
+`--placement` chooses where a counterfactual token is assumed to sit in a prefix that was partly
+written a second time after a cache TTL lapsed. Usage totals give the fraction, never the
+identity, so this is a modelling choice and not a measurement: `proportional` is the default and
+what every published figure quotes, `read` and `rewrite` are the corners the data still allows.
+It is worth ±0.03% of the pooled projection — wider than the projection — which is why the
+pooled headline is published as a range. `analyze`, `corpora` and `breakeven` all take it, and
+[docs/replay-correction.md](docs/replay-correction.md) works through what it does.
+
 This is the command behind "prose share of the bill", printed as the ceiling: the bound no
-prose-compressing tool can beat.
+prose-compressing tool can beat. That line is the **output side alone** — 0.4% to 1.1% of the
+bill. The amplified ceiling the post quotes, 2.5% to 4.2%, adds what those tokens cost on every
+later turn that carried them, and comes from `tools/ceiling.ts`:
+
+```bash
+npx tsx tools/ceiling.ts <dir1>,<dir2> [proportional|read|rewrite]
+```
 
 ### `compliance` — how often it fires
 
@@ -101,7 +123,8 @@ instrument rather than the tool.
 A corpus that never ran caveman has no injection profile to measure either, so the replay borrows
 the shipped one — 462 tokens once per session, 42 per prompt — and the report says `borrowed`
 where it did. That term decides the sign: charge nothing for injections and the pooled projection
-reads +0.42% instead of −0.01%.
+reads +0.41% instead of −0.00%. `npx tsx tools/injection-term.ts <dir1>,<dir2> claude-opus-5`
+prices it both ways at each placement.
 
 The command flags it when one corpus holds more than half the pooled bill. Ours held 84%.
 
@@ -194,6 +217,7 @@ you can reproduce exactly, without any transcripts of your own.
 ```bash
 npm run cli -- anatomy --root $C/cofounder,$C/gauthier    # one block per corpus, plus a pooled one
 npm run cli -- anatomy --root $C/gustave --tools-only     # just the per-tool exchange bill
+npm run cli -- anatomy --root $C/cofounder --vanilla-only # drop the sessions that ran caveman
 ```
 
 Not a caveman number — a property of the corpus. Four tables per corpus.
@@ -220,15 +244,28 @@ is what is left of billed output, and only on turns that actually carried a thin
 **Nothing in the loaded column is modelled.** An earlier version priced each class with
 `replayDelta`, charging it a cache read on every remaining turn of the session; that assumes
 tokens survive to the end, and real conversations compact and lose their prefix. It printed 4.39x
-the output rate against a measured 2.43x. The current code differences `cache_creation` against
-the previous turn's billed output for the write side, and splits each turn's _observed_
-`cache_read` across a carried prefix composition for the read side. The audit line prints the
-carried prefix over the billed `cache_read`; if that is not ~1.000, do not quote the table.
+the output rate against a measured 2.43x. The current code attributes writes by differencing
+`cache_read + cache_creation + input` — the whole request, which is invariant to how a TTL expiry
+splits tokens between the lanes — against the same total on the previous turn. Whatever was
+written beyond that delta is prefix being written a second time, and it is charged back to the
+prefix's existing composition rather than to any one origin. Reads are attributed by carrying
+that composition and splitting each turn's _observed_ `cache_read` across it.
+
+The audit line prints the carried prefix over the billed **request**, not over `cache_read`: the
+prefix's ceiling is the whole input side, because after an idle gap most of it returns as
+`cache_creation` rather than as a read, and clamping to `cache_read` would throw the history away
+and re-invent it as freshly fed-in content. If that ratio is not ~1.000, do not quote the table.
+The line below it reports the prefix tokens genuinely dropped along the way — compaction and
+context editing.
 
 `fedIn` is an **upper bound** on tool results, not a measurement of them. It is everything that is
-neither the preamble nor the previous turn's output, so it also absorbs injected reminders,
-subagent prefixes (`session.ts` does not filter `isSidechain`) and re-writes after a cache TTL
-expiry — each measured at roughly 14% of writes.
+neither the preamble nor the previous turn's output, so it also absorbs injected reminders and
+subagent prefixes (`session.ts` does not filter `isSidechain`). Re-writes after a TTL expiry used
+to land here too, at roughly 14% of writes, which credited the whole prefix to tool results and
+starved every other origin; they are now spread back across the prefix that was re-written.
+
+`--vanilla-only` drops the sessions that ran caveman, which is what you want when the point of
+the table is an untreated baseline rather than a description of your own bill.
 
 The Tools table narrows that upper bound using matched result blocks. `call out` is the billed
 tool-call output split by each call's token weight; `result in` and the exchange p50/p95 come from
@@ -283,6 +320,9 @@ attribution CC BY 4.0 asks a citer to honour; see [LICENSE-DATA](LICENSE-DATA).
 The commands print their own caveats and mean them. The short version:
 
 - Sensitivity is taken as 1, so every `p_fire` is a **lower** bound.
+- Where a counterfactual token sits in a partly re-written prefix is a choice, not a measurement,
+  and on the pooled projection it is worth more than the projection. Run `--placement read` and
+  `--placement rewrite` before quoting a signed pooled number.
 - Mid-run `R` is measured, but its pair IQR runs 0.15 to 0.93 — most of the interval below 1.0.
 - Thinking tokens are assumed untouched, and that assumption is untested — they are ~89% of
   billed output, so if caveman does compress them every figure here understates it.

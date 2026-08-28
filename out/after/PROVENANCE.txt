@@ -1,0 +1,12 @@
+# after the replayDelta correction (proportional placement)
+#
+# gate output here was regenerated after the pre-merge fixes: tools/ brought under typecheck
+# and lint, requestSize deduplicated into transcript/transition.ts, two anatomy tests added.
+# Paths are written as $C (see below) and . for the repo root; nothing else was edited.
+date:        2026-08-28T12:24:51Z
+git rev:     79e398d8f7af50da3b5ee51fa674d92c245e1be4
+node:        v26.7.0
+corpus root: $C = ~/src/jayn-headroom/.token-checker/corpora
+
+vanilla four: --root "$C/gauthier/projects,$C/corpus-5/projects,$C/corpus-6/projects,$C/jrigal/projects"
+caveman-live: --root "$C/cofounder,$C/maxence-2026-08"   (analyze now takes a list; no brace glob)

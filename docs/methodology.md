@@ -56,13 +56,43 @@ bad dependency for a tool meant to run on other people's machines.
 
 `src/transcript/replay.ts`
 
-A token written into the prefix at turn 3 of a 200-turn session is **re-read by every later
-turn** as a cache read. The same token written at turn 199 is read once. A flat "tokens removed
-× price" understates the first and overstates the second, and the error is not small — it scales
+A token written into the prefix at turn 3 of a 200-turn session is **paid for again by every
+later turn**. The same token written at turn 199 is paid for once. A flat "tokens removed ×
+price" understates the first and overstates the second, and the error is not small — it scales
 with session length.
 
+It is paid for again in one of three ways, and they differ by a factor of twelve:
+
+- a **cache read**, at 0.1× the input rate, while the breakpoint holding it is still warm;
+- a **cache write**, at 1.25× or 2.0×, on the turns where its TTL had lapsed and the prefix went
+  back up as `cache_creation`;
+- **not at all**, once compaction or context editing drops it out of the conversation.
+
 So a counterfactual is priced by replaying the session: change the token count at one position,
-recompute the cache-read amplification for every subsequent turn, and difference the totals.
+then follow that change forward through all three regimes and difference the totals. Three
+invariants keep that honest. Whatever share of the prefix the conversation dropped on the way
+into a request, the counterfactual delta is dropped in the same proportion. Whatever share of the
+prefix came back as `cache_creation`, that share of the delta is billed at the write multiplier
+rather than the read one. And the counterfactual prefix cannot be smaller than empty, so a
+negative delta is truncated at the request it lives in.
+
+`cacheRead + cacheWrite5m + cacheWrite1h + inputTokens` — the whole input side of a request — is
+what makes the second and third computable. That total is invariant to how a TTL expiry splits
+tokens between the read lane and the write lane, so its turn-to-turn delta is what genuinely
+arrived and anything written beyond it is prefix being re-written. Detecting expiry by
+`cacheRead === 0` instead misses the common case entirely: a session with several breakpoints
+comes back from an idle gap with a small surviving preamble read and the whole conversation
+re-written, and no lane is ever zero.
+
+**What billing cannot identify.** Usage totals say _how much_ of a surviving prefix was written a
+second time. They never say _which_ tokens, so they cannot say whether a token this replay
+invented would have been among them. `--placement` prices the three readings: `proportional`
+spreads the delta through the prefix like everything else and is what every figure quotes, while
+`read` and `rewrite` push it entirely out of, or into, the re-written region. On the four
+projected corpora that choice is worth ±0.03% of the pooled bill, which is wider than the pooled
+answer — so the pooled answer is published as a range and its sign is not claimed.
+[`docs/replay-correction.md`](replay-correction.md) derives all of this, and lists what the
+correction changed.
 
 The replay is exact on the observed side. The arm that actually happened is never modelled, only
 the arm that did not. That is why a session that already ran caveman is replayed **backwards**,
@@ -306,11 +336,12 @@ projection would price the ruleset and every reminder at nothing, and report a s
 cost side missing. `SHIPPED_PROFILE` stands in with the midpoint of the two correctly configured
 installs, 462 tokens once and 42 per prompt, and the report labels the profile borrowed wherever
 it used one. That term decides the sign: charge nothing for injections and the same replay
-reports **+0.42%**; charge them and it reports **−0.01%**.
+reports **+0.41%**; charge them and it reports **−0.00%**. `tools/injection-term.ts` prices both
+at each placement — the free column runs +0.37% to +0.42%, the charged one +0.02% to −0.03%.
 
-The two streams are kept apart rather than summed. A block at prefix position 0 is re-read every
-turn; a per-prompt reminder arriving at turn 20 of 25 is re-read five times. A combined total
-misprices both. Short sessions can come out **net negative** once injection is priced in, and the
+The two streams are kept apart rather than summed. A block at prefix position 0 is carried by
+every later turn; a per-prompt reminder arriving at turn 20 of 25 is carried by five. A combined
+total misprices both. Short sessions can come out **net negative** once injection is priced in, and the
 report says so.
 
 The SessionStart block re-fires at a compaction boundary, so caveman survives compaction. That is
@@ -323,14 +354,14 @@ decision.
 
 Both machines this was run from registered each caveman hook twice — once in `settings.json`,
 once via the enabled plugin, both binding the same scripts to the same events — so the same
-reminder was delivered twice on 98.9% of injection-carrying turns, $2.71 in total. On the corpus
-where it mattered most that is 263 of 266 turns: 96,316 injected tokens where 47,896 were needed,
-102 tokens per prompt where 51 were.
+reminder was delivered twice on 95% of injection-carrying turns, $2.67 in total. On the corpus
+where it mattered most that is 269 of 273 turns: 96,184 injected tokens where 48,244 were needed,
+205 tokens per prompt where 103 were.
 
 Charging that to caveman answers the wrong question. The report exists to decide whether to _run_
-the tool, and nobody chooses to run it misconfigured. It was decisive rather than cosmetic: the
-duplicate cost $1.67 against a $2.72 prose gain, which is the entire reason that corpus's
-headline had been negative.
+the tool, and nobody chooses to run it misconfigured. It is not cosmetic either: on that corpus
+the duplicate cost $1.70 against a $3.58 prose gain, so charging it would take the headline from
++0.7% to +0.4% — more than the width of every other uncertainty on the page.
 
 The consequence is accepted deliberately and surfaced rather than buried: **totals no longer
 reconcile with the invoice.** `Totals.paidUSD` keeps what was actually billed,
@@ -341,7 +372,8 @@ the tool is miscounting rather than that their config is.
 Deduplication is **per turn**. The same reminder arriving on many turns is exactly what a
 per-prompt hook is for; counting across turns would report a correct install as broken. And
 because the correction is a positional delta rather than a flat subtraction, a duplicate landing
-at turn 2 of 200 is credited with the 198 re-reads it actually caused.
+at turn 2 of 200 is credited with every later turn that carried it, at whatever mix of read and
+re-write those turns were billed at.
 
 ---
 

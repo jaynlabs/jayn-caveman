@@ -1,0 +1,66 @@
+
+## gauthier — 1727 sessions, 18915 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)         17     0.1%             593           0.0%
+  genuine prefix growth               18496    97.8%           36.0M          48.9%
+  full cold start                         1     0.0%             77k           0.1%
+  partial TTL rewrite                   372     2.0%           29.2M          39.6%
+  compaction + rewrite together          29     0.2%            8.4M          11.4%
+
+  re-written prefix              36.5M tokens, 49.5% of all cache creation
+  fresh input (never cached)      846k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 0.7%  p50 31.0%  p75 75.0%  p95 93.2%
+
+## corpus-5 — 25 sessions, 3449 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)          2     0.1%              88           0.0%
+  genuine prefix growth                3291    95.4%            4.7M          33.4%
+  partial TTL rewrite                   152     4.4%            9.1M          64.2%
+  compaction + rewrite together           4     0.1%            336k           2.4%
+
+  re-written prefix               9.2M tokens, 64.6% of all cache creation
+  fresh input (never cached)        6k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 0.2%  p50 0.6%  p75 54.7%  p95 96.3%
+
+## corpus-6 — 9 sessions, 1266 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)          5     0.4%             131           0.0%
+  genuine prefix growth                1242    98.1%            1.8M          25.4%
+  partial TTL rewrite                    19     1.5%            5.4M          74.6%
+
+  re-written prefix               5.3M tokens, 73.8% of all cache creation
+  fresh input (never cached)       10k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 65.2%  p50 89.0%  p75 95.1%  p95 96.0%
+
+## jrigal — 12 sessions, 1020 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)          5     0.5%             207           0.0%
+  genuine prefix growth                 923    90.5%            1.6M          32.0%
+  partial TTL rewrite                    89     8.7%            3.4M          66.7%
+  compaction + rewrite together           3     0.3%             62k           1.2%
+
+  re-written prefix               3.2M tokens, 63.6% of all cache creation
+  fresh input (never cached)       77k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 0.1%  p50 1.8%  p75 79.6%  p95 92.5%
+
+## all corpora pooled — 1773 sessions, 24650 transitions
+
+  transition                          turns  % turns  cache creation  % of creation
+  -------------------------------------------------------------------------------
+  normal cache hit (nothing new)         29     0.1%              1k           0.0%
+  genuine prefix growth               23952    97.2%           44.2M          44.1%
+  full cold start                         1     0.0%             77k           0.1%
+  partial TTL rewrite                   632     2.6%           47.0M          47.0%
+  compaction + rewrite together          36     0.1%            8.8M           8.8%
+
+  re-written prefix              54.2M tokens, 54.1% of all cache creation
+  fresh input (never cached)      939k tokens, 0.0% of the whole request
+  on a partial rewrite, that share of the surviving prefix:  p25 0.4%  p50 7.0%  p75 74.4%  p95 94.1%

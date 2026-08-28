@@ -10,25 +10,25 @@ So we measured it. And yes, it depends lol. Let's deep dive in the numbers.
 
 ## TL;DR
 
-On most corpora caveman cannot save more than 3% of the bill.
-If it fired on every turn, it would save **+0.79%**.
-Taking into account how it actually fires as a session grows, it returns **−0.01%** aka nothing.
-Caveman costs more than it saves below 500 English prose tokens per prompt you send.
+On most corpora caveman cannot save more than 4% of the bill.
+If it fired on every turn, it would save **+0.67%**.
+Taking into account how it actually fires as a session grows, it returns somewhere between **+0.02% and −0.03%** aka nothing.
+Caveman costs more than it saves below roughly 700 English prose tokens per prompt you send.
 
-<svg viewBox="0 0 640 260" role="img" aria-label="Prose is 4.1 to 7.0 percent of output tokens and 2.3 to 9.1 percent of the bill; caveman returns plus 0.79 percent if it always fired and minus 0.01 percent as it really fires" style="width:100%;height:auto;color:inherit">
+<svg viewBox="0 0 640 260" role="img" aria-label="Prose is 4.1 to 7.0 percent of output tokens and 2.5 to 4.2 percent of the bill; caveman returns plus 0.67 percent if it always fired and, as it really fires, between plus 0.02 and minus 0.03 percent" style="width:100%;height:auto;color:inherit">
   <g fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">
     <text x="0" y="34" opacity=".7">prose, share of output tokens</text>
     <rect x="287" y="42" width="139" height="16" opacity=".25"/>
     <text x="287" y="72" font-size="11" opacity=".7">4.1%</text><text x="402" y="72" font-size="11" opacity=".7">7.0%</text>
     <text x="0" y="104" opacity=".7">ceiling: prose as a share of the bill, cache re-reads included</text>
-    <rect x="200" y="112" width="327" height="16" opacity=".45"/>
-    <text x="200" y="142" font-size="11" opacity=".7">2.3%</text><text x="503" y="142" font-size="11" opacity=".7">9.1%</text>
+    <rect x="210" y="112" width="82" height="16" opacity=".45"/>
+    <text x="210" y="142" font-size="11" opacity=".7">2.5%</text><text x="268" y="142" font-size="11" opacity=".7">4.2%</text>
     <text x="0" y="174" opacity=".7">if caveman fired on every turn</text>
-    <rect x="90" y="182" width="38" height="16" opacity=".45"/>
-    <text x="134" y="195" font-size="11" opacity=".7">+0.79%</text>
+    <rect x="90" y="182" width="32" height="16" opacity=".45"/>
+    <text x="128" y="195" font-size="11" opacity=".7">+0.67%</text>
     <text x="0" y="234" opacity=".7">what caveman actually returned</text>
-    <rect x="88" y="242" width="2" height="16"/>
-    <text x="96" y="255" font-size="11" font-weight="600">−0.01%</text>
+    <rect x="89" y="242" width="2" height="16"/>
+    <text x="96" y="255" font-size="11" font-weight="600">+0.02% to −0.03%</text>
   </g>
   <line x1="90" y1="20" x2="90" y2="260" stroke="currentColor" stroke-width="1" opacity=".3"/>
 </svg>
@@ -42,8 +42,8 @@ First problem: caveman compresses model prose and nothing else. So first let's c
 
 Across the four corpora priced, prose is 4.1% to 7.0% of output tokens, and 0.4% to 1.1% of the bill counting only the turn that wrote it.
 
-But prose is not paid for once. It's cache-written or cache-read on every turn after that, so its real cost grows with how long your sessions run. Accounting for that raises the ceiling to 2.3% to 9.1% of the bill.
-The corpus topping that range does not write more prose than the rest: its sessions are simply long enough for the same tokens to be re-read hundreds of times.
+But prose is not paid for once. It stays in the prefix, and every later turn pays for it again — cheaply while the cache holds it, at the full write price whenever the cache lapsed and the prefix had to be sent up again. Accounting for that raises the ceiling to 2.5% to 4.2% of the bill.
+The corpus topping that range does not write more prose than the rest: its sessions are simply long enough for the same tokens to be paid for hundreds of times.
 
 On most sessions, prose is less than 3% of the bill, hence even with perfect compression, caveman cannot save more than that.
 
@@ -200,9 +200,11 @@ Interesting fact: with caveman on, 81% of mid-run turns produced no prose at all
 
 ## When a token was written matters as much as whether
 
-A token written at turn 3 of a 200-turn session is re-read by every later turn as a cache read. "Tokens saved × price" misprices the result, and the error grows with session length.
+A token written at turn 3 of a 200-turn session is paid for by every later turn — usually as a cheap cache read, at the full write price on the turns where the cache had lapsed and the whole prefix went up again, and not at all once compaction drops it. "Tokens saved × price" misprices all three, and the error grows with session length.
 
-So we replay the sessions: change the token count at one position, recompute cache-read amplification for every later turn, and difference the totals.
+So we replay the sessions: change the token count at one position, then follow that change through every later turn — read while it is cached, re-written when the cache expired, gone when the conversation compacts — and difference the totals.
+
+Billing says how much of a prefix was written a second time, never which tokens those were, so it cannot say whether a token we invented would have been among them. Every figure below is the estimate that spreads the change evenly through the prefix, and where the two corners of what billing allows move it, they are quoted alongside.
 
 This is also where caveman's own cost appears. Measured on the corpora that ran it, the SessionStart ruleset costs around **462 tokens** and the per-prompt reminder **42 tokens on every user turn**. That cost is charged in every projection below.
 
@@ -210,15 +212,15 @@ This is also where caveman's own cost appears. Measured on the corpora that ran 
 
 ## What it actually did, and what it would do
 
-**Where caveman actually ran** — 98 caveman-live sessions out of 108, $755.53 of bill. It saved **$4.84, or 0.6%**.
+**Where caveman actually ran** — 98 caveman-live sessions out of 108, $755.46 of bill. It saved **$4.74, or 0.6%**.
 The token-weighted fire rate on those turns is 50.6%.
 
 | scenario                                          | saved            |
 | ------------------------------------------------- | ---------------- |
-| caveman's advertised 0.35, charged to both strata | $12.81 · 1.7%    |
-| lower pair quartile (closing 0.59 / mid-run 0.15) | $7.05 · 0.9%     |
-| **pooled interactive trial (0.689 / 0.383)**      | **$4.84 · 0.6%** |
-| upper pair quartile (closing 0.77 / mid-run 0.93) | $2.78 · 0.4%     |
+| caveman's advertised 0.35, charged to both strata | $12.64 · 1.7%    |
+| lower pair quartile (closing 0.59 / mid-run 0.15) | $6.92 · 0.9%     |
+| **pooled interactive trial (0.689 / 0.383)**      | **$4.74 · 0.6%** |
+| upper pair quartile (closing 0.77 / mid-run 0.93) | $2.72 · 0.4%     |
 
 <svg viewBox="0 0 640 200" role="img" aria-label="Sensitivity band on the sessions that ran caveman: 0.4 to 1.7 percent saved, all positive" style="width:100%;height:auto;color:inherit">
   <line x1="300" y1="18" x2="300" y2="166" stroke="currentColor" stroke-width="1" opacity=".45"/>
@@ -241,13 +243,13 @@ These sessions never carried caveman's injections, so the projection adds them b
 
 | corpus   | bill         | if it always fired   | with `p_fire` wired in |
 | -------- | ------------ | -------------------- | ---------------------- |
-| corpus A | $4578.70     | +$28.85 · +0.63%     | **+$3.34 · +0.07%**    |
-| corpus B | $623.58      | +$12.53 · +2.01%     | **−$3.68 · −0.59%**    |
-| corpus C | $131.84      | +$0.87 · +0.66%      | **−$0.08 · −0.06%**    |
-| corpus D | $97.65       | +$0.77 · +0.78%      | **+$0.09 · +0.09%**    |
-| **all**  | **$5431.76** | **+$42.93 · +0.79%** | **−$0.34 · −0.01%**    |
+| corpus A | $4578.70     | +$30.60 · +0.67%     | **+$2.94 · +0.06%**    |
+| corpus B | $623.58      | +$4.25 · +0.68%      | **−$3.15 · −0.51%**    |
+| corpus C | $131.84      | +$1.00 · +0.76%      | **−$0.10 · −0.08%**    |
+| corpus D | $97.65       | +$0.80 · +0.82%      | **+$0.08 · +0.08%**    |
+| **all**  | **$5431.76** | **+$36.61 · +0.67%** | **−$0.24 · −0.00%**    |
 
-<svg viewBox="0 0 640 250" role="img" aria-label="Projected savings per corpus, priced twice: if caveman always fired every corpus gains between 0.63 and 2.01 percent; with p_fire wired in corpus B falls to minus 0.59 percent, corpus C to minus 0.06 percent, and the pooled result is minus 0.01 percent" style="width:100%;height:auto;color:inherit">
+<svg viewBox="0 0 640 250" role="img" aria-label="Projected savings per corpus, priced twice: if caveman always fired every corpus gains between 0.67 and 0.82 percent; with p_fire wired in corpus B falls to minus 0.51 percent, corpus C to minus 0.08 percent, and the pooled result is zero to within three hundredths of a percent" style="width:100%;height:auto;color:inherit">
   <line x1="250" y1="18" x2="250" y2="204" stroke="currentColor" stroke-width="1" opacity=".45"/>
   <g fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif">
     <g font-size="12">
@@ -260,26 +262,26 @@ These sessions never carried caveman's injections, so the projection adds them b
       <text x="64" y="150">$98</text><text x="64" y="186">$5,432</text>
     </g>
     <g opacity=".22">
-      <rect x="250" y="26" width="91" height="11"/><rect x="250" y="62" width="292" height="11"/>
-      <rect x="250" y="98" width="96" height="11"/><rect x="250" y="134" width="113" height="11"/>
-      <rect x="250" y="170" width="115" height="11"/>
+      <rect x="250" y="26" width="194" height="11"/><rect x="250" y="62" width="197" height="11"/>
+      <rect x="250" y="98" width="220" height="11"/><rect x="250" y="134" width="238" height="11"/>
+      <rect x="250" y="170" width="194" height="11"/>
     </g>
     <g opacity=".8">
-      <rect x="250" y="39" width="10" height="11"/><rect x="164" y="75" width="86" height="11"/>
-      <rect x="241" y="111" width="9" height="11"/><rect x="250" y="147" width="13" height="11"/>
-      <rect x="248" y="183" width="2" height="11"/>
+      <rect x="250" y="39" width="17" height="11"/><rect x="102" y="75" width="148" height="11"/>
+      <rect x="227" y="111" width="23" height="11"/><rect x="250" y="147" width="23" height="11"/>
+      <rect x="241" y="183" width="15" height="11"/>
     </g>
     <g font-size="11" opacity=".55">
-      <text x="347" y="35">+0.63%</text><text x="548" y="71">+2.01%</text><text x="352" y="107">+0.66%</text>
-      <text x="369" y="143">+0.78%</text><text x="371" y="179">+0.79%</text>
+      <text x="450" y="35">+0.67%</text><text x="453" y="71">+0.68%</text><text x="476" y="107">+0.76%</text>
+      <text x="494" y="143">+0.82%</text><text x="450" y="179">+0.67%</text>
     </g>
     <g font-size="11" font-weight="600">
-      <text x="266" y="48">+$3.34 · +0.07%</text><text x="256" y="84">−$3.68 · −0.59%</text>
-      <text x="256" y="120">−$0.08 · −0.06%</text><text x="269" y="156">+$0.09 · +0.09%</text>
-      <text x="256" y="192">−$0.34 · −0.01%</text>
+      <text x="273" y="48">+$2.94 · +0.06%</text><text x="256" y="84">−$3.15 · −0.51%</text>
+      <text x="256" y="120">−$0.10 · −0.08%</text><text x="279" y="156">+$0.08 · +0.08%</text>
+      <text x="262" y="192">−$1.57 to +$1.03 · ±0.03%</text>
     </g>
     <g font-size="11" opacity=".5">
-      <text x="163" y="218">−0.5%</text><text x="243" y="218">0</text><text x="388" y="218">+1%</text><text x="533" y="218">+2%</text>
+      <text x="90" y="218">−0.5%</text><text x="243" y="218">0</text><text x="380" y="218">+0.5%</text><text x="527" y="218">+1%</text>
     </g>
     <rect x="250" y="232" width="14" height="9" opacity=".22"/>
     <text x="270" y="241" font-size="11" opacity=".6">if it always fired</text>
@@ -290,9 +292,9 @@ These sessions never carried caveman's injections, so the projection adds them b
 <!-- fig: The same four corpora, priced twice -->
 
 Four corpora, 504 English sessions. Two come out positive and two negative, and the pooled result is indistinguishable from zero. The whole point of this post is the difference between a tool that always fires and the same tool as it actually behaves.
-And it goes from +0.79% to nothing at all for caveman.
+And it goes from +0.67% to nothing at all for caveman.
 
-Two caveats. Corpus A is 84% of that pooled bill, so read the rows rather than the total. And 1,269 sessions worth $48.96 were dropped for not being entirely English.
+Three caveats. Corpus A is 84% of that pooled bill, so read the rows rather than the total. 1,269 sessions worth $48.96 were dropped for not being entirely English. And the pooled `p_fire` column is smaller than what the billing data can pin down: pushing the counterfactual tokens into the re-written part of the prefix or out of it moves that cell from **−$1.57 (−0.03%)** to **+$1.03 (+0.02%)**. We cannot tell you its sign. We can tell you its size — zero, to within three hundredths of a percent of the bill — and that is the claim. The always-fired column does not have this problem: it runs +0.63% to +0.67% across the same corners.
 
 ---
 
@@ -308,38 +310,38 @@ Its benefit is a fraction of the English prose in the answer. It pays exactly wh
 
 | English prose per prompt | sessions | share of bill | share that gain | money-weighted |
 | ------------------------ | -------- | ------------- | --------------- | -------------- |
-| 0–200                    | 92       | 2.7%          | 0%              | −0.376%        |
-| 200–400                  | 123      | 30.6%         | 11%             | −0.278%        |
-| 400–600                  | 112      | 28.2%         | 40%             | **+0.010%**    |
-| 600–800                  | 71       | 16.1%         | 58%             | **+0.162%**    |
-| 800–1000                 | 44       | 7.9%          | 64%             | **+0.196%**    |
-| 1000–1500                | 38       | 10.8%         | 66%             | **+0.275%**    |
-| 1500–2500                | 18       | 2.8%          | 78%             | **+0.451%**    |
+| 0–200                    | 92       | 2.7%          | 0%              | −0.428%        |
+| 200–400                  | 123      | 30.6%         | 10%             | −0.260%        |
+| 400–600                  | 112      | 28.2%         | 39%             | −0.002%        |
+| 600–800                  | 71       | 16.1%         | 54%             | **+0.161%**    |
+| 800–1000                 | 44       | 7.9%          | 57%             | **+0.187%**    |
+| 1000–1500                | 38       | 10.8%         | 63%             | **+0.291%**    |
+| 1500–2500                | 18       | 2.8%          | 78%             | **+0.462%**    |
 | 2500+                    | 6        | 0.9%          | 100%            | **+0.261%**    |
 
-<svg viewBox="0 0 620 260" role="img" aria-label="Share of sessions where caveman gains money rises from zero to one hundred percent as English prose per prompt rises, crossing between 400 and 600" style="width:100%;height:auto;color:inherit">
+<svg viewBox="0 0 620 260" role="img" aria-label="Share of sessions where caveman gains money rises from zero to one hundred percent as English prose per prompt rises, crossing between 600 and 800" style="width:100%;height:auto;color:inherit">
   <g stroke="currentColor" opacity=".18" stroke-width="1">
     <line x1="62" y1="210" x2="592" y2="210"/><line x1="62" y1="125" x2="592" y2="125"/><line x1="62" y1="40" x2="592" y2="40"/>
   </g>
-  <line x1="115" y1="30" x2="115" y2="220" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4" opacity=".55"/>
-  <text x="121" y="48" fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600">breaks even ≈ 500</text>
+  <line x1="136" y1="30" x2="136" y2="220" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 4" opacity=".55"/>
+  <text x="142" y="48" fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600">breaks even ≈ 700</text>
   <g fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" opacity=".6">
     <text x="16" y="44">100%</text><text x="24" y="129">50%</text><text x="32" y="214">0%</text>
     <text x="54" y="232">0</text><text x="160" y="232">1k</text><text x="266" y="232">2k</text><text x="372" y="232">3k</text><text x="478" y="232">4k</text>
     <text x="150" y="252" opacity=".85">English prose tokens per prompt</text>
   </g>
-  <polyline fill="none" stroke="currentColor" stroke-width="2.5" points="73,210 94,192 115,142 136,112 157,102 195,98 274,78 354,40"/>
+  <polyline fill="none" stroke="currentColor" stroke-width="2.5" points="73,210 94,193 115,143 136,119 157,113 195,103 274,78 354,40"/>
   <g fill="currentColor">
-    <circle cx="73" cy="210" r="3.5"/><circle cx="94" cy="192" r="3.5"/><circle cx="115" cy="142" r="3.5"/>
-    <circle cx="136" cy="112" r="3.5"/><circle cx="157" cy="102" r="3.5"/><circle cx="195" cy="98" r="3.5"/>
+    <circle cx="73" cy="210" r="3.5"/><circle cx="94" cy="193" r="3.5"/><circle cx="115" cy="143" r="3.5"/>
+    <circle cx="136" cy="119" r="3.5"/><circle cx="157" cy="113" r="3.5"/><circle cx="195" cy="103" r="3.5"/>
     <circle cx="274" cy="78" r="3.5"/><circle cx="354" cy="40" r="3.5"/>
   </g>
   <text x="370" y="52" fill="currentColor" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" opacity=".75">share of sessions where caveman gains</text>
 </svg>
-<!-- fig: The break-even line sits near 500 prose tokens per prompt -->
+<!-- fig: The break-even line sits near 700 prose tokens per prompt -->
 
 Below a few hundred English prose tokens per prompt, no session gains. Above 1,000 most do.
-The crossing is around 500.
+The crossing lands between 600 and 800 — call it 700. It is 400 to 600 at the friendliest reading of the cache accounting, which is the same answer with a wider error bar, not a different one.
 
 ---
 
@@ -351,9 +353,9 @@ If you want to know whether a token-saving tool is worth running:
 
 **Randomize.** One session with the tool on, one without, same kind of work.
 
-**Look at where your bill actually is.** A prose compressor is pointless if prose is not where your money goes. On the corpora here, thinking is roughly 89% of _billed output_, with prose never exceeding 9% of the bill even in the best case.
+**Look at where your bill actually is.** A prose compressor is pointless if prose is not where your money goes. On the corpora here, thinking is roughly 89% of _billed output_, with prose never exceeding 4.3% of the bill even in the best case.
 
-**Or just count.** Divide the English prose your model writes by the number of prompts you send. Well under 500 tokens, don't bother. Well over, it might pay.
+**Or just count.** Divide the English prose your model writes by the number of prompts you send. Well under 700 tokens, don't bother. Well over, it might pay.
 
 And be suspicious of any single percentage, including ours.
 

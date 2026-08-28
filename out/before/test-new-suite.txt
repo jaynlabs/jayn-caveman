@@ -1,0 +1,16 @@
+✖ a negative delta cannot make the counterfactual prefix negative (0.083ms)
+✖ cold start re-writes the prefix instead of reading it (0.404666ms)
+✖ compaction and fresh prose on the same transition (0.198333ms)
+✖ compaction stops the compacted delta from accumulating cost (0.073083ms)
+✖ conservation: an unchanged replay is exactly the observed bill (0.586166ms)
+ℹ fail 12
+✖ failing tests:
+✖ mixed 5m and 1h writes keep their distinct prices through a rewrite (0.264166ms)
+✖ partial TTL rewrite is priced between a clean hit and a full cold start (0.469791ms)
+✖ partial TTL rewrite: a surviving preamble does not make the suffix free (3.45325ms)
+ℹ pass 139
+✖ placement bounds bracket the proportional estimate (0.089125ms)
+✖ placement does not matter on a full cold start either (0.1695ms)
+✖ positive delta: reconstructing vanilla across a partial expiry (0.103ms)
+✖ regression: the observed 26.5k-read / 741k-write shape (0.092708ms)
+ℹ tests 151

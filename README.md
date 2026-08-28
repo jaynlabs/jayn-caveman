@@ -15,13 +15,14 @@ Warning : Yes, this is mostly pair-programmed with Opus 5.
 
 ## TL;DR
 
-On most corpora caveman cannot save more than 3% of the bill, however well it works.
-If it fired on every turn it would save **+0.79%**. As it actually fires, it returns
-**−0.01%** — nothing. The reminder injections cost more than the compression saves below
-roughly **500 English prose tokens per prompt** you send.
+On most corpora caveman cannot save more than 4% of the bill, however well it works.
+If it fired on every turn it would save **+0.67%**. As it actually fires, it returns
+between **+0.02% and −0.03%** — nothing, and the billing data cannot resolve which side of
+zero. The reminder injections cost more than the compression saves below roughly
+**700 English prose tokens per prompt** you send.
 
-Where caveman genuinely ran, it did save: **$4.84 on $755.53, or 0.6%**. That is a measurement.
-The −0.01% is a projection onto people who never installed it, and the two are different
+Where caveman genuinely ran, it did save: **$4.74 on $755.46, or 0.6%**. That is a measurement.
+The ±0.03% is a projection onto people who never installed it, and the two are different
 questions.
 
 ---
@@ -54,17 +55,24 @@ npm run cli -- analyze --root ~/.claude/projects --model claude-opus-5
 ### 1. The ceiling: prose is a small slice of the bill
 
 Prose is 4.1%–7.0% of output tokens, and 0.4%–1.1% of the bill counting only the turn that wrote
-it. But prose is cache-written once and cache-read on every later turn, so the real ceiling —
-what you would save if caveman deleted _all_ prose and were free — is **2.3% to 9.1%** of the
-bill, and under 3% on three of the four corpora.
+it. But prose stays in the prefix and is paid for again on every later turn — cheaply while the
+cache holds it, at the full write price on the turns where the cache had lapsed — so the real
+ceiling, what you would save if caveman deleted _all_ prose and were free, is **2.5% to 4.2%** of
+the bill, and under 3% on three of the four corpora.
 
 ```bash
 npm run cli -- analyze --root <dir> --model claude-opus-5
-#   Audit → "prose share of bill"
+#   Audit → "prose share of bill" — the output side alone, 0.4%–1.1%
+
+npx tsx tools/ceiling.ts <dir>,<dir> [proportional|read|rewrite]
+#   → the amplified ceiling, 2.5%–4.2%
 ```
 
-The corpus topping that range has an unremarkable 6.6% prose share; its sessions are simply long
-enough for the same tokens to be re-read hundreds of times. That is the whole budget caveman is
+That range is 2.3%–4.3% across the two corners of what billing can identify; see
+[`docs/replay-correction.md`](docs/replay-correction.md).
+
+The corpus topping the range has an unremarkable 6.6% prose share; its sessions are simply long
+enough for the same tokens to be paid for hundreds of times. That is the whole budget caveman is
 competing for.
 
 ### 2. Two numbers, not one
@@ -157,20 +165,24 @@ so it borrows the midpoint, 462 and 42 tokens (`SHIPPED_PROFILE` in
 `src/transcript/injection.ts`).
 
 That borrowing is not a detail. Charge nothing for injections and the same replay reports
-**+0.42%**; charge them and it reports **−0.01%**. A projection that omits the tool's cost is not
+**+0.41%**; charge them and it reports **−0.00%**. A projection that omits the tool's cost is not
 a projection of the tool.
+
+```bash
+npx tsx tools/injection-term.ts <dirA>,<dirB>,<dirC>,<dirD> claude-opus-5
+```
 
 ### 7. What it did, and what it would do
 
-**Measured**, on the 98 caveman-live sessions of 108 ($755.53 of bill): **saved $4.84, 0.6%**. The
+**Measured**, on the 98 caveman-live sessions of 108 ($755.46 of bill): **saved $4.74, 0.6%**. The
 token-weighted fire rate over those turns is 50.6%.
 
 | scenario                                          | saved            |
 | ------------------------------------------------- | ---------------- |
-| caveman's advertised 0.35, charged to both strata | $12.81 · 1.7%    |
-| lower pair quartile (closing 0.59 / mid-run 0.15) | $7.05 · 0.9%     |
-| **pooled interactive trial (0.689 / 0.383)**      | **$4.84 · 0.6%** |
-| upper pair quartile (closing 0.77 / mid-run 0.93) | $2.78 · 0.4%     |
+| caveman's advertised 0.35, charged to both strata | $12.64 · 1.7%    |
+| lower pair quartile (closing 0.59 / mid-run 0.15) | $6.92 · 0.9%     |
+| **pooled interactive trial (0.689 / 0.383)**      | **$4.74 · 0.6%** |
+| upper pair quartile (closing 0.77 / mid-run 0.93) | $2.72 · 0.4%     |
 
 Caveman's advertised 0.35 saves nearly three times the measurement — because it is charged to
 **both** strata, while the quartiles leave closing turns at 0.59–0.77 where the trial found them.
@@ -181,18 +193,25 @@ stratum that holds the money.
 
 | corpus   | bill         | if it always fired   | with `p_fire` wired in |
 | -------- | ------------ | -------------------- | ---------------------- |
-| corpus A | $4578.70     | +$28.85 · +0.63%     | **+$3.34 · +0.07%**    |
-| corpus B | $623.58      | +$12.53 · +2.01%     | **−$3.68 · −0.59%**    |
-| corpus C | $131.84      | +$0.87 · +0.66%      | **−$0.08 · −0.06%**    |
-| corpus D | $97.65       | +$0.77 · +0.78%      | **+$0.09 · +0.09%**    |
-| **all**  | **$5431.76** | **+$42.93 · +0.79%** | **−$0.34 · −0.01%**    |
+| corpus A | $4578.70     | +$30.60 · +0.67%     | **+$2.94 · +0.06%**    |
+| corpus B | $623.58      | +$4.25 · +0.68%      | **−$3.15 · −0.51%**    |
+| corpus C | $131.84      | +$1.00 · +0.76%      | **−$0.10 · −0.08%**    |
+| corpus D | $97.65       | +$0.80 · +0.82%      | **+$0.08 · +0.08%**    |
+| **all**  | **$5431.76** | **+$36.61 · +0.67%** | **−$0.24 · −0.00%**    |
 
 ```bash
 npm run cli -- corpora --root <dirA>,<dirB>,<dirC>,<dirD> --model claude-opus-5
+#   --placement read | rewrite prices the two corners of the same table
 ```
 
 Two positive, two negative, pooled indistinguishable from zero. Corpus A is 84% of that bill, so
 read the rows rather than the total.
+
+The pooled `p_fire` cell is finer than the data can resolve. Billing says what fraction of a
+prefix was written a second time, never which tokens those were, so it cannot say whether the
+tokens this replay invents would have been among them. Across the two corners that allows, that
+cell runs **−$1.57 (−0.03%) to +$1.03 (+0.02%)**: the sign is not identified, the magnitude is.
+The always-fired column is robust over the same range, +0.63% to +0.67%.
 
 > **Note on `--root` labels.** Rows are labelled by directory basename. Pointing at several
 > `.../<name>/projects` paths collapses them into one row called `projects`. Give each corpus a
@@ -205,21 +224,22 @@ answer. So it pays exactly when the answer is long enough to cover the reminder 
 
 | English prose per prompt | sessions | share of bill | share that gain | money-weighted |
 | ------------------------ | -------- | ------------- | --------------- | -------------- |
-| 0–200                    | 92       | 2.7%          | 0%              | −0.376%        |
-| 200–400                  | 123      | 30.6%         | 11%             | −0.278%        |
-| 400–600                  | 112      | 28.2%         | 40%             | **+0.010%**    |
-| 600–800                  | 71       | 16.1%         | 58%             | **+0.162%**    |
-| 800–1000                 | 44       | 7.9%          | 64%             | **+0.196%**    |
-| 1000–1500                | 38       | 10.8%         | 66%             | **+0.275%**    |
-| 1500–2500                | 18       | 2.8%          | 78%             | **+0.451%**    |
+| 0–200                    | 92       | 2.7%          | 0%              | −0.428%        |
+| 200–400                  | 123      | 30.6%         | 10%             | −0.260%        |
+| 400–600                  | 112      | 28.2%         | 39%             | −0.002%        |
+| 600–800                  | 71       | 16.1%         | 54%             | **+0.161%**    |
+| 800–1000                 | 44       | 7.9%          | 57%             | **+0.187%**    |
+| 1000–1500                | 38       | 10.8%         | 63%             | **+0.291%**    |
+| 1500–2500                | 18       | 2.8%          | 78%             | **+0.462%**    |
 | 2500+                    | 6        | 0.9%          | 100%            | **+0.261%**    |
 
 ```bash
 npm run cli -- breakeven --root <dir>,<dir> --model claude-opus-5
-#   → "Breaks even between 400 and 600 prose tokens per prompt."
+#   → "Breaks even between 600 and 800 prose tokens per prompt."
+#   --placement read moves that to 400–600; the corners are in docs/replay-correction.md
 ```
 
-**Divide the English prose your model writes by the prompts you send.** Well under 500, don't
+**Divide the English prose your model writes by the prompts you send.** Well under 700, don't
 bother. Well over, it might pay.
 
 ---
@@ -244,18 +264,28 @@ npm run cli -- trial analyze --root <ledger>,<ledger>
 
 # 6. refit the shipped thresholds from data/
 npm run cli -- curves build
+
+# 7. the amplified prose ceiling, and the two corners around it
+npx tsx tools/ceiling.ts <dirA>,<dirB> proportional
+
+# 8. what charging caveman's own injections is worth
+npx tsx tools/injection-term.ts <dirA>,<dirB> claude-opus-5
 ```
+
+Steps 7 and 8 price tools that do not exist — perfect free compression, and caveman with its
+cost side switched off — so they live in `tools/` rather than in the CLI.
 
 Useful flags on most commands:
 
-| flag                | effect                                                              |
-| ------------------- | ------------------------------------------------------------------- |
-| `--model <family>`  | fit `p_fire` on one model family only — recommended, see below      |
-| `--mixed-languages` | keep non-English sessions (off by default, and off for good reason) |
-| `--exact`           | count tokens via `count_tokens` instead of the offline BPE counter  |
-| `--by-position`     | `compliance` only: split each curve into closing and mid-run        |
+| flag                  | effect                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `--model <family>`    | fit `p_fire` on one model family only — recommended, see below                     |
+| `--mixed-languages`   | keep non-English sessions (off by default, and off for good reason)                |
+| `--exact`             | count tokens via `count_tokens` instead of the offline BPE counter                 |
+| `--by-position`       | `compliance` only: split each curve into closing and mid-run                       |
+| `--placement <where>` | `analyze`/`corpora`/`breakeven`: where a changed token sits in a re-written prefix |
 
-Checks: `npm test` (123 tests), `npm run typecheck`, `npm run lint`, `npm run format:check`.
+Checks: `npm test` (153 tests), `npm run typecheck`, `npm run lint`, `npm run format:check`.
 
 ---
 
@@ -274,9 +304,14 @@ Checks: `npm test` (123 tests), `npm run typecheck`, `npm run lint`, `npm run fo
   Transcripts store thinking as empty text, so it is only reachable as a residual. Thinking is
   roughly 89% of _billed output_ on these corpora — if caveman moves it, everything here is
   understated by a lot.
+- **The replay prices a token the bill never contained.** Usage totals say how much of a prefix
+  was written a second time after a cache TTL lapsed; they never say which tokens those were. So
+  where a counterfactual token sits in that prefix is a modelling choice, and it is worth ±0.03%
+  of the pooled bill — more than the pooled answer itself. `--placement read|rewrite` prices the
+  corners; [`docs/replay-correction.md`](docs/replay-correction.md) works through why.
 - **A doubly-registered hook is not the tool's cost.** Both our machines registered each caveman
   hook twice for months, delivering the same reminder twice on 98.9% of injection-carrying turns.
-  That cost $2.71 and is excluded from anything labelled "saved".
+  That cost $2.67 and is excluded from anything labelled "saved".
 
 ---
 

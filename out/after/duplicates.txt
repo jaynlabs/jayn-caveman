@@ -1,0 +1,3 @@
+# doubly-registered hook, per corpus (one-off, tools/.dupes.ts, deleted after)
+cofounder: 139/157 turns carried a duplicate; 40,814 injected where 20,750 needed; 164 tok/prompt where 83
+maxence-2026-08: 269/273 turns carried a duplicate; 96,184 injected where 48,244 needed; 205 tok/prompt where 103
