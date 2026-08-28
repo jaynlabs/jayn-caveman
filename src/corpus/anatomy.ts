@@ -1,5 +1,6 @@
 import { price } from '../billing/pricing.js';
 import type { SessionAnalysis, Turn } from '../transcript/session.js';
+import { requestSize } from '../transcript/transition.js';
 import { memoCountTokens, type TokenCounter } from '../transcript/tokens.js';
 
 /**
@@ -295,7 +296,7 @@ export function attribute(
   const toolCosts = new Map<string, ToolCostTotals>();
   const classOutputUSD = Object.fromEntries(CLASSES.map((c) => [c, 0])) as Record<ContentClass, number>;
   let carried = 0;
-  let billedRead = 0;
+  let billedPrefix = 0;
   let compactedTokens = 0;
   let unpriced = false;
 
@@ -337,19 +338,40 @@ export function attribute(
 
       // --- read side, against the prefix as the API actually billed it
       let inPrefix = sum();
-      if (turn.cacheRead > 0 && inPrefix > turn.cacheRead) {
-        // the billed prefix shrank: compaction, context editing, or a dropped prefix. Rescale so
+
+      // The system prompt and tool schemas are usually still cached from an earlier session, so on
+      // the very first turn they arrive as cache_read and never appear as cache_creation anywhere
+      // in this one. Without seeding them the prefix is short by the whole preamble for every turn
+      // that follows, not just this one. A resumed session's carried-in history lands here too.
+      if (i === 0 && inPrefix === 0 && turn.cacheRead > 0) {
+        inPrefixOf.preamble += turn.cacheRead + turn.inputTokens;
+        inPrefix = sum();
+      }
+
+      // Audit before correcting anything: once the previous turn was attributed, the reconstruction
+      // should equal the input the API charged for that request.
+      const before = i > 0 ? session.turns[i - 1] : undefined;
+      if (before) {
+        carried += inPrefix;
+        billedPrefix += requestSize(before);
+      }
+
+      // A prefix cannot exceed the request that carried it. The ceiling is the WHOLE request, not
+      // the cache_read portion: after an idle gap the cache expires and most of the prefix returns
+      // as cache_creation. That is a re-write, not a compaction, and clamping to cache_read would
+      // throw the entire history away and re-invent it as freshly fed-in content.
+      const ceiling = requestSize(turn);
+      if (ceiling > 0 && inPrefix > ceiling) {
+        // the prefix genuinely shrank: compaction, context editing, or a dropped prefix. Rescale so
         // later turns keep attributing against something real instead of a phantom history.
-        compactedTokens += inPrefix - turn.cacheRead;
-        const keep = turn.cacheRead / inPrefix;
+        compactedTokens += inPrefix - ceiling;
+        const keep = ceiling / inPrefix;
         for (const origin of ORIGINS) inPrefixOf[origin] *= keep;
         for (const [name, tokens] of callPrefix) callPrefix.set(name, tokens * keep);
         for (const [name, tokens] of resultPrefix) resultPrefix.set(name, tokens * keep);
-        inPrefix = turn.cacheRead;
+        inPrefix = ceiling;
       }
       if (turn.cacheRead > 0 && inPrefix > 0) {
-        carried += inPrefix;
-        billedRead += turn.cacheRead;
         const cost = price(turn.model, turn.timestamp, { ...ZERO, cacheRead: turn.cacheRead }).costUSD;
         if (cost === null) unpriced = true;
         else {
@@ -405,30 +427,38 @@ export function attribute(
         addTo(resultPrefix, name, tokens);
       };
 
+      // Re-writing prefix that already exists does not add new content: charge the tokens back to
+      // whatever is already in there, proportionally, and leave the prefix composition alone.
+      const rewrite = (amount: number) => {
+        if (amount <= 0) return;
+        const total = sum();
+        if (total <= 0) {
+          add('fedIn', amount);
+          return;
+        }
+        for (const origin of ORIGINS) {
+          const tokens = amount * (inPrefixOf[origin] / total);
+          origins[origin].written += tokens;
+          origins[origin].writeUSD += tokens * perWrite;
+        }
+        for (const [name, weight] of callPrefix) {
+          const tokens = amount * (weight / total);
+          const tool = toolCost(toolCosts, name);
+          tool.callWrittenTokens += tokens;
+          tool.callWriteUSD += tokens * perWrite;
+        }
+        for (const [name, weight] of resultPrefix) {
+          const tokens = amount * (weight / total);
+          const tool = toolCost(toolCosts, name);
+          tool.resultWrittenTokens += tokens;
+          tool.resultWriteUSD += tokens * perWrite;
+        }
+      };
+
       const prev = i > 0 ? session.turns[i - 1] : undefined;
       if (prev && isColdStart(turn)) {
-        // the whole prefix was re-written after expiry, not just the new part; charge it back to
-        // whatever is already in there rather than inventing new content
-        const total = sum();
-        if (total > 0) {
-          for (const origin of ORIGINS) {
-            const tokens = write * (inPrefixOf[origin] / total);
-            origins[origin].written += tokens;
-            origins[origin].writeUSD += tokens * perWrite;
-          }
-          for (const [name, amount] of callPrefix) {
-            const tokens = write * (amount / total);
-            const tool = toolCost(toolCosts, name);
-            tool.callWrittenTokens += tokens;
-            tool.callWriteUSD += tokens * perWrite;
-          }
-          for (const [name, amount] of resultPrefix) {
-            const tokens = write * (amount / total);
-            const tool = toolCost(toolCosts, name);
-            tool.resultWrittenTokens += tokens;
-            tool.resultWriteUSD += tokens * perWrite;
-          }
-        } else add('fedIn', write);
+        // the whole prefix was re-written after expiry, not just the new part
+        rewrite(write);
         continue;
       }
       if (!prev) {
@@ -436,7 +466,12 @@ export function attribute(
         continue;
       }
 
-      const echoed = Math.min(write, prev.outputTokens);
+      // How much of this write is genuinely new content, decided by billing rather than by the
+      // transcript. cache_read + cache_creation + input is the whole request, and that total is
+      // invariant to how a TTL expiry splits tokens between read and write — so its turn-to-turn
+      // delta is what actually arrived. Anything written beyond it is prefix being re-written.
+      const attributable = Math.min(write, Math.max(0, requestSize(turn) - requestSize(prev)));
+      const echoed = Math.min(attributable, prev.outputTokens);
       let toolEchoed = 0;
       if (echoed > 0) {
         const prior = CLASSES.map((c) => split?.[c][i - 1] ?? 0);
@@ -452,7 +487,11 @@ export function attribute(
       const previousTools = toolSplit?.turns[i - 1];
       if (previousTools) distribute(toolEchoed, previousTools.calls, (name, tokens) => addCall(name, tokens));
 
-      const fedIn = write - echoed;
+      // Re-writes are invisible to isColdStart, which requires cache_read to be zero, but routine
+      // once a session carries several cache breakpoints. Charging them to fedIn credits the whole
+      // prefix to tool results and starves every other origin.
+      rewrite(write - attributable);
+      const fedIn = attributable - echoed;
       add('fedIn', fedIn);
       if (toolTurn) {
         const resultSeen = [...toolTurn.results.values()].reduce((sum, tokens) => sum + tokens, 0);
@@ -470,7 +509,7 @@ export function attribute(
   return {
     origins,
     classOutputUSD,
-    identityRatio: billedRead === 0 ? 1 : carried / billedRead,
+    identityRatio: billedPrefix === 0 ? 1 : carried / billedPrefix,
     compactedTokens,
     toolCosts,
     unpriced,

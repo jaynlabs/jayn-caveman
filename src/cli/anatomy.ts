@@ -17,12 +17,13 @@ import { ApiCounter, resolveApiKey, type TokenCounter } from '../transcript/toke
 import type { Args, Command } from './args.js';
 import { ROOT_HELP, targetsFrom } from './roots.js';
 
-const SPEC = { value: ['root'], boolean: ['exact', 'tools-only'] } as const;
+const SPEC = { value: ['root'], boolean: ['exact', 'tools-only', 'vanilla-only'] } as const;
 
 const USAGE = `jayn-caveman anatomy — what the bill is made of, by billing lane and by content class
 
 ${ROOT_HELP}
   --tools-only        print only the separate per-tool call and result bills
+  --vanilla-only      drop sessions that ran caveman, leaving an untreated baseline
   --exact             count tokens with Anthropic's count_tokens API instead of the
                       offline BPE counter. Needs ANTHROPIC_API_KEY.
 
@@ -174,7 +175,7 @@ function originTable(report: Anatomy): string[] {
   );
   lines.push('');
   lines.push(
-    `  audit: the carried prefix is ${report.identityRatio.toFixed(3)}x the billed cache_read` +
+    `  audit: the carried prefix is ${report.identityRatio.toFixed(3)}x the billed request` +
       ` (1.000 is exact).\n  ${tokens(report.compactedTokens)} prefix tokens were dropped along the way — compaction and context editing.`,
   );
   lines.push(
@@ -381,6 +382,17 @@ async function run(args: Args): Promise<void> {
   const targets = targetsFrom(args);
   const owned = await loadGrouped(targets, { blockDetail: true });
   const byLabel = groupByLabel(owned, targets);
+
+  if (args.has('vanilla-only')) {
+    for (const [label, sessions] of byLabel) {
+      const kept = sessions.filter((session) => !session.cavemanActive);
+      const dropped = sessions.length - kept.length;
+      if (dropped > 0) {
+        console.error(`${label}: dropped ${dropped} of ${sessions.length} sessions for running caveman.`);
+      }
+      byLabel.set(label, kept);
+    }
+  }
 
   const reports: Anatomy[] = [];
   for (const [label, sessions] of byLabel) {

@@ -295,3 +295,39 @@ test('output the split could not classify is not credited to any class', () => {
   assert.equal(a.origins.reasoning.written + a.origins.prose.written + a.origins.toolCalls.written, 0);
   assert.equal(a.origins.fedIn.written, 100, 'unclassified echo falls through to fedIn');
 });
+
+test('a partial cache expiry is a re-write, not a compaction', () => {
+  // The shape that actually dominates a long session: the preamble breakpoint still hits, the
+  // conversation suffix has aged past its TTL and comes back as cache_creation. Nothing was
+  // dropped — clamping the prefix to cache_read would delete 8k of real history and re-invent it.
+  const turns = [
+    turn({ index: 0, id: 'msg_0', cacheWrite1h: 10_000 }),
+    turn({ index: 1, id: 'msg_1', cacheRead: 2000, cacheWrite1h: 8000 }),
+  ];
+  const one = session(turns);
+  const split: ClassSplit = { reasoning: [0, 0], prose: [0, 0], toolCalls: [0, 0], overflowTokens: 0 };
+  const a = attribute([one], new Map([[one, split]]));
+
+  assert.equal(a.compactedTokens, 0, 'the request did not shrink, so nothing was compacted');
+  assert.equal(a.origins.fedIn.written, 0, 'no new content arrived: requestSize is unchanged');
+  assert.equal(a.origins.preamble.written, 18_000, 'the 8k re-write is charged back to the prefix');
+  assert.equal(a.origins.preamble.read, 2000, 'only the surviving breakpoint was read');
+  // the denominator is turn 0's whole request, 10k — not turn 1's 2k cache_read
+  assert.equal(a.identityRatio, 1, 'the carried prefix equals the request that carried it');
+});
+
+test('only what the request grew by is new content; the rest is prefix written twice', () => {
+  // Same partial expiry, but 1k of genuinely new input arrived with it. Charging the whole 9k
+  // write to fedIn would credit the entire history to whatever fed it in and starve every other
+  // origin — the failure that made tool results look like they owned the bill.
+  const turns = [
+    turn({ index: 0, id: 'msg_0', cacheWrite1h: 10_000 }),
+    turn({ index: 1, id: 'msg_1', cacheRead: 2000, cacheWrite1h: 9000 }),
+  ];
+  const one = session(turns);
+  const split: ClassSplit = { reasoning: [0, 0], prose: [0, 0], toolCalls: [0, 0], overflowTokens: 0 };
+  const a = attribute([one], new Map([[one, split]]));
+
+  assert.equal(a.origins.fedIn.written, 1000, 'requestSize grew by 1000, so 1000 is new');
+  assert.equal(a.origins.preamble.written, 18_000, 'the other 8000 was prefix re-written');
+});
